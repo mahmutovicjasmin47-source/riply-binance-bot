@@ -1,14 +1,17 @@
 {
   "name": "riply-binance-bot",
   "version": "1.0.0",
-  "type": "module",
+  "description": "Binance trading bot za test i održavanje konekcije",
   "main": "index.js",
-  "license": "MIT",
-  "dependencies": {
-    "binance-api-node": "^0.13.1",
-    "dotenv": "^16.4.5"
-  },
+  "type": "module",
   "scripts": {
     "start": "node index.js"
+  },
+  "dependencies": {
+    "binance-api-node": "^0.12.5",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
