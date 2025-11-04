@@ -1,17 +1,19 @@
 {
   "name": "riply-binance-bot",
   "version": "1.0.0",
-  "description": "Binance trading bot za test i održavanje konekcije",
+  "description": "Simple Binance trading bot with stop loss and take profit",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "axios": "^1.7.4",
     "binance-api-node": "^0.12.5",
     "dotenv": "^16.3.1"
   },
   "engines": {
-    "node": ">=18.0.0"
-  }
+    "node": ">=18"
+  },
+  "author": "Jasmin",
+  "license": "MIT"
 }
