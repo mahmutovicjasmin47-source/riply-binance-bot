@@ -1,68 +1,34 @@
-// RIPLY BINANCE SPOT — ROBUST ESM/CJS LOADER (fix za "Binance is not a function")
-import 'dotenv/config';
-import http from 'http';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
+require('dotenv').config();
+const Binance = require('binance-api-node').default;
 
-// ---- Robusno učitavanje binance-api-node (ESM/CJS kompat) ----
-let BinanceFactory;
-try {
-  const mod = await import('binance-api-node');               // ESM pokušaj
-  BinanceFactory =
-    (mod && typeof mod.default === 'function') ? mod.default :
-    (typeof mod === 'function') ? mod :
-    (mod && typeof mod.Binance === 'function') ? mod.Binance : null;
-} catch {
-  const mod = require('binance-api-node');                     // CJS fallback
-  BinanceFactory =
-    (mod && typeof mod.default === 'function') ? mod.default :
-    (typeof mod === 'function') ? mod :
-    (mod && typeof mod.Binance === 'function') ? mod.Binance : null;
-}
+// Učitaj varijable okruženja
+const client = Binance({
+  apiKey: process.env.BINANCE_API_KEY,
+  apiSecret: process.env.BINANCE_API_SECRET,
+});
 
-if (!BinanceFactory) {
-  console.error('❌ Ne mogu dobiti Binance factory iz paketa. Provjeri verziju "binance-api-node".');
-  console.error('Savjet: u package.json ostavi "binance-api-node": "^0.12.5" i Node >= 18.');
-  // Ne gasim proces – server će ostati živ da vidiš log.
-}
+const SYMBOL = process.env.SYMBOL || 'BTCUSDT';
+const POSITION_SIZE = parseFloat(process.env.POSITION_SIZE_USDT || 10);
+const STOP_LOSS_PCT = parseFloat(process.env.STOP_LOSS_PCT || 0.4);
+const TAKE_PROFIT_PCT = parseFloat(process.env.TAKE_PROFIT_PCT || 0.6);
+const LIVE_TRADING = process.env.LIVE_TRADING === 'true';
 
-// ---- ENV ----
-const apiKey = process.env.BINANCE_API_KEY;
-const apiSecret = process.env.BINANCE_API_SECRET;
-if (!apiKey || !apiSecret) {
-  console.error('❌ Nedostaju BINANCE_API_KEY / BINANCE_API_SECRET u ENV.');
-}
-
-// ---- Keep-alive HTTP (Railway) ----
-const PORT = Number(process.env.PORT || 8080);
-http.createServer((_, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('riply-binance-bot alive\n');
-}).listen(PORT, () => console.log(`ℹ️ keep-alive na portu ${PORT}`));
-
-// ---- Ako je factory pronađen, kreiraj klijenta i uradi minimalnu dijagnostiku ----
-async function start() {
-  if (!BinanceFactory) {
-    console.error('⚠️  Preskačem Binance pozive jer factory nije pronađen.');
-    return;
-  }
-  const client = BinanceFactory({ apiKey, apiSecret });
-
+async function trade() {
   try {
-    await client.ping();
-    await client.time();
-    const acc = await client.accountInfo({ recvWindow: 10000 });
-    console.log('✅ Povezan na Binance. canTrade=', acc.canTrade);
-  } catch (e) {
-    console.error('❌ Konekcija/perm greška:', e.body || e.message || e);
-  }
+    console.log('✅ Bot uspješno povezan na Binance API!');
+    const prices = await client.prices();
+    console.log('📊 Trenutna cijena', SYMBOL, prices[SYMBOL]);
 
-  setInterval(() => {
-    console.log('💓 heartbeat', new Date().toISOString());
-  }, 60_000);
+    // Ako je LIVE_TRADING true, možeš ubaciti logiku za kupovinu/prodaju ovdje
+    if (LIVE_TRADING) {
+      console.log(`🔁 Live trading aktivan za ${SYMBOL}`);
+    } else {
+      console.log('🧪 Test mode aktivan (bez pravih transakcija)');
+    }
+  } catch (err) {
+    console.error('❌ Greška u petlji:', err.message);
+  }
 }
 
-start();
-
-process.on('SIGINT',  () => { console.log('SIGINT');  process.exit(0); });
-process.on('SIGTERM', () => { console.log('SIGTERM'); process.exit(0); });
+trade();
+setInterval(trade, 60 * 1000); // pokreće svakih 60 sekundi
