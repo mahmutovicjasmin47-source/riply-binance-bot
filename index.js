@@ -1,60 +1,55 @@
 require('dotenv').config();
 const Binance = require('binance-api-node').default;
 
-// ✅ Rezervni unos API ključeva (ako Railway ne učita ENV)
-const API_KEY = process.env.BINANCE_API_KEY?.trim() || 'fHTaDjB2LcS8oaEuADpOeg29AkDhPAsKJ7k9W7aD4kyuLxQ85WgL0V5vAV2dM';
-const API_SECRET = process.env.BINANCE_API_SECRET?.trim() || 't3JOY3KKqux56WeVby0kQQYcpaM1112vjFIrPkryMqQoiOld11ZaSIKPI7INuJbR';
-
-// ✅ Inicijalizacija Binance klijenta
+// Povezivanje sa Binance API
 const client = Binance({
-  apiKey: API_KEY,
-  apiSecret: API_SECRET,
-  httpBase: 'https://api.binance.com',
-  useServerTime: true,
-  recvWindow: 60000
+  apiKey: process.env.BINANCE_API_KEY,
+  apiSecret: process.env.BINANCE_API_SECRET
 });
 
-// ✅ Varijable okruženja
+// Učitavanje konfiguracije iz ENV
 const SYMBOL = process.env.SYMBOL || 'BTCUSDT';
 const POSITION_SIZE_USDT = parseFloat(process.env.POSITION_SIZE_USDT || '10');
 const STOP_LOSS_PCT = parseFloat(process.env.STOP_LOSS_PCT || '0.4');
 const TAKE_PROFIT_PCT = parseFloat(process.env.TAKE_PROFIT_PCT || '0.6');
-const LIVE_TRADING = process.env.LIVE_TRADING === 'true';
+const LIVE_TRADING = process.env.LIVE_TRADING === "true";
 
-// ✅ Dijagnostika API ključa
-(async () => {
+async function trade() {
   try {
-    console.log('🔄 Testiram konekciju prema Binance API...');
-    await client.ping();
-    console.log('🌐 Ping OK — konekcija uspostavljena.');
+    console.log("✅ Bot povezan sa Binance API");
 
-    const account = await client.accountInfo();
-    console.log('✅ API ključ validan. Bot ima pristup Binance računu.');
-    console.log(`📊 Trading simbol: ${SYMBOL}`);
-    console.log(`💰 Pozicija: ${POSITION_SIZE_USDT} USDT`);
-    console.log(`🛑 Stop loss: ${STOP_LOSS_PCT}%`);
-    console.log(`🎯 Take profit: ${TAKE_PROFIT_PCT}%`);
-    console.log(`🧩 Live trading: ${LIVE_TRADING}`);
-
-    tradeLoop();
-  } catch (err) {
-    console.error('❌ Greška u API dijagnostici!');
-    console.error('Poruka:', err?.message || err);
-    console.error('Kod:', err?.code || '');
-    console.error('Napomena: Provjeri da API ključ i Secret nisu regenerisani.');
-    process.exit(1);
-  }
-})();
-
-// ✅ Glavna petlja
-async function tradeLoop() {
-  try {
-    console.log('🚀 Bot uspješno pokrenut. Čeka signal...');
     const prices = await client.prices();
-    console.log('📈 Trenutna cijena za', SYMBOL, ':', prices[SYMBOL]);
-  } catch (error) {
-    console.error('⚠️ Greška u tradeLoop:', error.message);
-  }
+    const currentPrice = parseFloat(prices[SYMBOL]);
 
-  setTimeout(tradeLoop, 120000);
+    console.log(`📊 Trenutna cijena ${SYMBOL}: ${currentPrice}`);
+
+    // Logika pozicije
+    const stopLossPrice = currentPrice * (1 - STOP_LOSS_PCT / 100);
+    const takeProfitPrice = currentPrice * (1 + TAKE_PROFIT_PCT / 100);
+
+    console.log(`📉 Stop Loss: ${stopLossPrice.toFixed(2)}`);
+    console.log(`📈 Take Profit: ${takeProfitPrice.toFixed(2)}`);
+
+    if (LIVE_TRADING) {
+      console.log("🚀 *TRGOVANJE UKLJUČENO* (LIVE_TRADING=true)");
+
+      await client.order({
+        symbol: SYMBOL,
+        side: 'BUY',
+        type: 'MARKET',
+        quoteOrderQty: POSITION_SIZE_USDT
+      });
+
+      console.log(`✅ Kupovina izvršena: ${POSITION_SIZE_USDT} USDT u ${SYMBOL}`);
+    } else {
+      console.log("🔎 Simulacija: LIVE_TRADING=false → ne kupujemo, samo pratimo.");
+    }
+
+  } catch (err) {
+    console.error("❌ Greška u botu:", err.message || err);
+  }
 }
+
+// Pokretanje bota u petlji
+setInterval(trade, 15000); // radi svakih 15 sekundi
+console.log("🤖 Bot pokrenut...");
