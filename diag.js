@@ -2,8 +2,8 @@
 import crypto from "crypto";
 import fetch from "node-fetch";
 
-const API_KEY = "32|xaTHH6GWvN4d9BszEnVOSh6tic
-1B8y0L8ScUYM|B6LmWRsmkLIGkY
+const API_KEY = "32IxaTHH6GWvN4d9BszEnVOSh6tic
+1B8y0L8ScUYMIB6LmWRsmkLIGkY
 EyAq1tdS";
 const API_SECRET = "gh3KUncKJdzMzQmYJur2iGzsCggZ
 ouoBUvJ9Q01P1hH1f8xSlaT1INCY
