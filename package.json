@@ -1,13 +1,13 @@
 {
   "name": "riply-binance-bot",
   "version": "1.0.0",
+  "description": "Simple Binance spot bot (90% balance, TP 0.9%, SL 0.4%)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "binance-api-node": "^0.12.5",
     "dotenv": "^16.3.1",
-    "axios": "^1.7.4"
+    "binance-api-node": "^0.12.0"
   }
 }
