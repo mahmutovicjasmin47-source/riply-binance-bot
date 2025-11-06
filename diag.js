@@ -1,44 +1,60 @@
-// diag.js — test API SPOT permissions
-import crypto from "crypto";
-import fetch from "node-fetch";
+// === ENV LOADING & VALIDATION ===
+const API_KEY = process.env.BINANCE_API_KEY;
+const API_SECRET = process.env.BINANCE_SECRET_KEY;
 
-const API_KEY = "32IxaTHH6GWvN4d9BszEnVOSh6tic
-1B8y0L8ScUYMIB6LmWRsmkLIGkY
-EyAq1tdS";
-const API_SECRET = "gh3KUncKJdzMzQmYJur2iGzsCggZ
-ouoBUvJ9Q01P1hH1f8xSlaT1INCY
-KsSCqqUP";
+const LIVE_TRADING = (process.env.LIVE_TRADING || "false").toString().toLowerCase() === "true";
+const SYMBOL = process.env.SYMBOL || "BTCUSDT";
+const POSITION_SIZE_USDT = Number(process.env.POSITION_SIZE_USDT || "10");
+const STOP_LOSS_PCT = Number(process.env.STOP_LOSS_PCT || "0.4");
+const TAKE_PROFIT_PCT = Number(process.env.TAKE_PROFIT_PCT || "0.6");
 
-const BASE = "https://api.binance.com";
+const Binance = require('node-binance-api');
+const binance = new Binance().options({
+  APIKEY: API_KEY,
+  APISECRET: API_SECRET
+});
 
-function sign(query) {
-  return crypto.createHmac("sha256", API_SECRET).update(query).digest("hex");
+// Mali test da vidimo jesu li ključevi učitani
+const mask = (s) => (s ? s.slice(0,4) + "****" + s.slice(-4) : "NEMA");
+console.log("[ENV] API KEY:", mask(API_KEY));
+console.log("[ENV] SYMBOL:", SYMBOL, "| LIVE_TRADING:", LIVE_TRADING);
+
+if (!API_KEY || !API_SECRET) {
+  console.error("\n❌ ENV problem: API ključevi nisu učitani!");
+  console.error("Provjeri nazive varijabli na Railway-u:");
+  console.error("BINANCE_API_KEY  i  BINANCE_SECRET_KEY\n");
+  process.exit(1);
 }
 
-async function main() {
+// === TRADING LOGIKA ===
+async function trade() {
   try {
-    const t = await (await fetch(`${BASE}/api/v3/time`)).json();
-    console.log("Server time OK:", t);
+    const price = await binance.prices(SYMBOL);
+    const currentPrice = Number(price[SYMBOL]);
 
-    const qsAcc = `timestamp=${Date.now()}`;
-    const acc = await (await fetch(`${BASE}/api/v3/account?${qsAcc}&signature=${sign(qsAcc)}`, {
-      headers: { "X-MBX-APIKEY": API_KEY }
-    })).json();
-    console.log("ACCOUNT result:", acc);
+    console.log(`\n${SYMBOL} = ${currentPrice}`);
 
-    const ts = Date.now();
-    const params = `symbol=BTCUSDT&side=BUY&type=MARKET&timestamp=${ts}`;
-    const sig = sign(params);
+    const stopLoss = currentPrice * (1 - STOP_LOSS_PCT / 100);
+    const takeProfit = currentPrice * (1 + TAKE_PROFIT_PCT / 100);
 
-    const testOrder = await (await fetch(`${BASE}/api/v3/order/test?${params}&signature=${sig}`, {
-      method: "POST",
-      headers: { "X-MBX-APIKEY": API_KEY }
-    })).json();
+    console.log(`SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}`);
 
-    console.log("TEST ORDER result:", testOrder);
-  } catch (e) {
-    console.error("DIAG ERROR:", e);
+    if (!LIVE_TRADING) {
+      console.log("🔍 Simulacija aktivna (LIVE_TRADING=false) — bez naloga.");
+      return;
+    }
+
+    // MARKER: OVDJE IDE NALOG
+    console.log("✅ Slanje BUY naloga...");
+    await binance.marketBuy(SYMBOL, POSITION_SIZE_USDT / currentPrice);
+    console.log("✅ BUY izvršen!");
+
+  } catch (err) {
+    console.error("Greška:", err.message);
   }
 }
 
-main();
+// pokrećemo svakih 30 sekundi
+console.log("🚀 Bot pokrenut...");
+trade();
+setInterval(trade, 30000);
