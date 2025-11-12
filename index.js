@@ -1,310 +1,274 @@
-/* ========= riply multi-asset bot =========
- * Exchange: Binance (spot)
- * Client:   binance-api-node
- * Features:
- *  - Multi-symbol (BTC/ETH/BNB vs USDC)
- *  - Target weights (rebalance) 50/30/20
- *  - Dynamic trailing SL + TP per trade (random in range)
- *  - Daily guards: target %, no-negative-day, max trades
- *  - 100% reinvest (compound)
- *  - Uses existing holdings (sells/buys to reach targets)
- * ======================================== */
-
 require('dotenv').config();
 const Binance = require('binance-api-node').default;
 const http = require('http');
 
+// ====== ENV ======
 const API_KEY    = process.env.BINANCE_API_KEY || process.env.API_KEY;
 const API_SECRET = process.env.BINANCE_API_SECRET || process.env.API_SECRET;
 if (!API_KEY || !API_SECRET) { console.error('[FATAL] Missing API keys'); process.exit(1); }
 
-const LIVE  = (process.env.LIVE_TRADING || 'true').toLowerCase() === 'true';
+const LIVE    = (process.env.LIVE_TRADING || 'true').toLowerCase() === 'true';
 
-// ---- portfolio & risk ----
-const SYMBOLS = (process.env.SYMBOLS || 'BTCUSDC,ETHUSDC,BNBUSDC')
+// Lista simbola i alokacije kapitala (zbroj = 1.0)
+/*
+  Primjer:
+  SYMBOLS="BTCUSDC,ETHUSDC,BNBUSDC"
+  ALLOC_PCT="BTCUSDC:0.5,ETHUSDC:0.3,BNBUSDC:0.2"
+*/
+const SYMBOLS   = (process.env.SYMBOLS || 'BTCUSDC,ETHUSDC,BNBUSDC')
   .split(',').map(s => s.trim().toUpperCase());
 
-const TARGET_W = {
-  BTCUSDC: Number(process.env.TARGET_W_BTC || '0.50'), // 50%
-  ETHUSDC: Number(process.env.TARGET_W_ETH || '0.30'), // 30%
-  BNBUSDC: Number(process.env.TARGET_W_BNB || '0.20')  // 20%
-};
+const ALLOC_MAP = {};
+(String(process.env.ALLOC_PCT || 'BTCUSDC:0.5,ETHUSDC:0.3,BNBUSDC:0.2')
+  .split(',')).forEach(x => {
+    const [sym, val] = x.split(':');
+    if (sym && val) ALLOC_MAP[sym.toUpperCase()] = Math.max(0, Math.min(1, Number(val)));
+  });
 
-// raspon TP (%) po trejdu (npr. 1.5–2.4)
-const TP_MIN = Number(process.env.TP_MIN_PCT || '1.5');
-const TP_MAX = Number(process.env.TP_MAX_PCT || '2.4');
+// Koliki dio (0..1) od ALOKIRANOG USDC ulazimo po trejdu (npr. 0.50 = 50%)
+const INVEST_PCT = Math.max(0, Math.min(1, Number(process.env.INVEST_PCT || '0.50')));
 
-// trailing stop (dinamički) – koliki “korak” spoilujemo iza cijene
-const TRAIL_PCT = Number(process.env.TRAIL_PCT || '0.6'); // 0.6% iza high-a
+// TP u rasponu – nasumično izmedju min i max (u %)
+const TP_MIN = Number(process.env.TP_PCT_MIN || '1.5');
+const TP_MAX = Number(process.env.TP_PCT_MAX || '2.4');
 
-// fallback “hard” SL ako trailing ne uhvati
-const HARD_SL_PCT = Number(process.env.HARD_SL_PCT || '0.35');
+// Fiksni „hard” SL i trailing SL (u %)
+const SL_PCT     = Number(process.env.STOP_LOSS_PCT || '0.25');   // sigurnosni hard stop
+const TRAIL_PCT  = Number(process.env.TRAILING_PCT   || '0.60');   // koliko daleko „vuče“ stop od vrha
 
-// koliki dio slobodnog USDC-a koristimo po ulasku (0–1)
-const POSITION_SIZE_PCT = Math.max(0, Math.min(1, Number(process.env.POSITION_SIZE_PCT || '0.50')));
-
-// dnevne zaštite
-const DAILY_TARGET_PCT = Number(process.env.DAILY_TARGET_PCT || '3');   // npr. 3% dnevno
+// Dnevne zaštite
+const DAILY_TARGET_PCT = Number(process.env.DAILY_TARGET_PCT || '3'); // globalno (svi parovi)
 const NO_NEG_DAY       = (process.env.NO_NEGATIVE_DAY || 'true').toLowerCase() === 'true';
-const MAX_TRADES_PER_DAY = parseInt(process.env.MAX_TRADES_PER_DAY || '12', 10);
+const MAX_TRADES_PER_DAY = parseInt(process.env.MAX_TRADES_PER_DAY || '7', 10);
 
-// rebalance
-const REBALANCE_EVERY_SEC   = parseInt(process.env.REBALANCE_EVERY_SEC || '600', 10); // svakih 10 min
-const REBALANCE_TOLERANCE_P = Number(process.env.REBALANCE_TOLERANCE_P || '3'); // dopušteno odstupanje od cilja
+// Telegram (opciono)
+const TG_TOKEN = process.env.TELEGRAM_TOKEN || '';
+const TG_CHAT  = process.env.TELEGRAM_CHAT_ID || '';
+const ALERTS   = (!!TG_TOKEN && !!TG_CHAT);
 
-// --- client ---
+// ====== Client ======
 const client = Binance({ apiKey: API_KEY, apiSecret: API_SECRET });
 
-// --- helpers ---
+// ====== Helpers ======
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const pct = (a,b) => ((a-b)/b)*100;
-const clamp = (x, a, b) => Math.min(Math.max(x, a), b);
+const randTP = () => (TP_MIN + Math.random()*(TP_MAX - TP_MIN));
 
-let filters = {}; // per-symbol
+async function sendAlert(msg) {
+  try {
+    if (!ALERTS) return;
+    const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
+    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ chat_id: TG_CHAT, text: String(msg) }) });
+  } catch {}
+}
 
-async function loadFilters() {
+async function price(symbol){
+  const t = await client.prices({ symbol });
+  return Number(t[symbol]);
+}
+
+async function getFilters(symbol){
   const ex = await client.exchangeInfo();
-  for (const sym of SYMBOLS) {
-    const s = ex.symbols.find(x => x.symbol === sym);
-    if (!s) throw new Error(`Symbol ${sym} not found`);
-    const lot  = s.filters.find(f=>f.filterType==='LOT_SIZE');
-    const tick = s.filters.find(f=>f.filterType==='PRICE_FILTER');
-    const noti = s.filters.find(f=>['NOTIONAL','MIN_NOTIONAL'].includes(f.filterType));
-    filters[sym] = {
-      stepSize: Number(lot.stepSize),
-      minQty: Number(lot.minQty),
-      tickSize: Number(tick.tickSize),
-      minNotional: noti ? Number(noti.minNotional || noti.notional) : 10
-    };
-  }
+  const s = ex.symbols.find(x=>x.symbol===symbol);
+  const lot  = s.filters.find(f=>f.filterType==='LOT_SIZE');
+  const tick = s.filters.find(f=>f.filterType==='PRICE_FILTER');
+  const noti = s.filters.find(f=>['NOTIONAL','MIN_NOTIONAL'].includes(f.filterType));
+  return {
+    stepSize: Number(lot.stepSize),
+    minQty: Number(lot.minQty),
+    tickSize: Number(tick.tickSize),
+    minNotional: noti ? Number(noti.minNotional || noti.notional) : 10
+  };
 }
-const roundStep = (q, step)=> Number((Math.floor(q/step)*step).toFixed(8));
-const roundTick = (p, tick)=> Number((Math.round(p/tick)*tick).toFixed(8));
+function roundStep(q, step){ const p = Math.floor(q/step)*step; return Number(p.toFixed(8)); }
+function roundTick(p, tick){ const r = Math.round(p/tick)*tick; return Number(r.toFixed(8)); }
 
-async function price(sym){
-  const t = await client.prices({ symbol: sym });
-  return Number(t[sym]);
-}
-async function account() {
+async function accountBalances(){
   const acc = await client.accountInfo();
-  const get = (a)=> Number(acc.balances.find(b=>b.asset===a)?.free || 0);
-  const map = {};
-  for (const sym of SYMBOLS) {
-    const quote = sym.endsWith('USDC') ? 'USDC' : sym.slice(-4);
-    const base  = sym.replace(quote,'');
-    map[sym] = { base, quote, freeBase:get(base), freeQuote:get(quote) };
-  }
-  // ukupni USDC
-  map.USDC = get('USDC');
-  return map;
+  const get = a => Number(acc.balances.find(b=>b.asset===a)?.free||0);
+  return {
+    USDC: get('USDC'),
+    BTC : get('BTC'),
+    ETH : get('ETH'),
+    BNB : get('BNB'),
+  };
+}
+async function candles(symbol, interval, limit){
+  const ks = await client.candles({ symbol, interval, limit });
+  return ks.map(k=>({ h:Number(k.high), c:Number(k.close) }));
+}
+const sma = (arr,n)=> arr.slice(-n).reduce((s,x)=>s+x,0)/n;
+
+// ====== Per-symbol state ======
+const state = {};
+const filtersCache = {};
+for (const sym of SYMBOLS){
+  state[sym] = {
+    inPos:false, entry:0, qty:0,
+    peak:0, trailStop:0, tpPct:randTP(),
+    tradesToday:0,
+  };
 }
 
-// --- day state ---
+// Global dnevna metrika
 let dayKey = new Date().toISOString().slice(0,10);
-let todayPnlPct = 0;
-let tradesToday = 0;
-
-function maybeResetDay() {
+let dailyPnL = 0; // u %
+function resetDayIfNeeded(){
   const k = new Date().toISOString().slice(0,10);
-  if (k !== dayKey) {
-    dayKey = k; todayPnlPct = 0; tradesToday = 0;
-    console.log('\n[DAY] Reset metrika.');
+  if (k!==dayKey){
+    dayKey=k; dailyPnL=0;
+    for (const sym of SYMBOLS){ state[sym].tradesToday=0; }
+    console.log('\n[DAY] Reset dnevnih metrika.');
+    sendAlert('📆 Novi dan: reset.');
   }
 }
-function dayGuard() {
-  if (DAILY_TARGET_PCT>0 && todayPnlPct >= DAILY_TARGET_PCT) return '[GUARD] daily target hit';
-  if (NO_NEG_DAY && todayPnlPct < 0) return '[GUARD] no-negative-day active';
-  if (tradesToday >= MAX_TRADES_PER_DAY) return '[GUARD] max trades/day';
-  return '';
+function guardsActive(){
+  if (DAILY_TARGET_PCT>0 && dailyPnL >= DAILY_TARGET_PCT){
+    console.log(`[GUARD] Dnevni target +${dailyPnL.toFixed(2)}% ≥ ${DAILY_TARGET_PCT}%`);
+    return true;
+  }
+  if (NO_NEG_DAY && dailyPnL < 0){
+    console.log(`[GUARD] No-Red-Day aktivan (${dailyPnL.toFixed(2)}%)`);
+    return true;
+  }
+  return false;
 }
 
-// --- trailing state per symbol ---
-const pos = {};
-for (const s of SYMBOLS) pos[s] = { in:false, qty:0, entry:0, trailTop:0, tpPct:0 };
+// ====== Signal (brzi breakout + trend filter) ======
+async function entrySignal(symbol){
+  const m1 = await candles(symbol,'1m',25);
+  const m5 = await candles(symbol,'5m',25);
+  if (m1.length<21 || m5.length<21) return false;
+  const m1c=m1.map(x=>x.c), m5c=m5.map(x=>x.c);
+  const m1s5=sma(m1c,5),  m1s20=sma(m1c,20);
+  const m5s5=sma(m5c,5),  m5s20=sma(m5c,20);
+  const lastClose = m1c[m1c.length-1];
+  const prevHigh  = m1[m1.length-2].h;
 
-// choose TP in [TP_MIN, TP_MAX]
-const pickTP = ()=> Number((TP_MIN + Math.random()*(TP_MAX-TP_MIN)).toFixed(2));
-
-// --- trading logic ---
-async function enter(sym){
-  const guard = dayGuard(); if (guard) return;
-
-  const info = await account();
-  const p = await price(sym);
-  const { stepSize, minQty, minNotional } = filters[sym];
-
-  const freeUSDC = info.USDC;
-  let spend = freeUSDC * POSITION_SIZE_PCT;
-  if (spend < minNotional) return; // premalo
-
-  let qty = spend / p;
-  qty = Math.max(minQty, roundStep(qty, stepSize));
-  if (qty * p < minNotional) return;
-
-  if (!LIVE) {
-    console.log(`[DRY BUY ${sym}] qty=${qty} @${p}`);
-  } else {
-    try {
-      const buy = await client.order({ symbol: sym, side:'BUY', type:'MARKET', quantity:String(qty) });
-      const fillP = buy.fills?.length
-        ? buy.fills.reduce((s,f)=>s+Number(f.price)*Number(f.qty),0)/buy.fills.reduce((s,f)=>s+Number(f.qty),0)
-        : p;
-      pos[sym].qty   = Number(buy.executedQty);
-      pos[sym].entry = fillP;
-      pos[sym].in    = true;
-      pos[sym].trailTop = fillP;            // start trailing
-      pos[sym].tpPct = pickTP();            // random TP
-      tradesToday++;
-      console.log(`[BUY ${sym}] qty=${pos[sym].qty} @${pos[sym].entry} | TP=${pos[sym].tpPct}% trail=${TRAIL_PCT}%`);
-    } catch (e) {
-      console.error('[BUY ERROR]', e.body||e.message||e);
-      return;
-    }
-  }
-
-  // Place OCO for hard TP/SL as backup (trailing će raditi ručno u petlji)
-  await placeOCO(sym, pos[sym].entry, pos[sym].qty, pos[sym].tpPct, HARD_SL_PCT);
+  return (lastClose > prevHigh*1.0002) && (m1s5>m1s20) && (m5s5>m5s20);
 }
 
-async function placeOCO(sym, entry, qty, tpPct, slPct) {
-  try {
-    const f = filters[sym];
-    const tp = roundTick(entry*(1+tpPct/100), f.tickSize);
-    const sl = roundTick(entry*(1-slPct/100), f.tickSize);
-    const slLim = roundTick(sl*0.999, f.tickSize);
-    if (!LIVE) { console.log(`[OCO ${sym}] TP ${tp} | SL ${sl} | qty ${qty}`); return; }
-    await client.orderOco({
-      symbol:sym, side:'SELL', quantity:String(qty),
-      price:String(tp), stopPrice:String(sl), stopLimitPrice:String(slLim),
-      stopLimitTimeInForce:'GTC'
-    });
-  } catch (e) {
-    console.log('[OCO WARN]', sym, e.body||e.message||e);
+// ====== Trading core ======
+async function tryEnter(symbol){
+  if (guardsActive()) return;
+  const s = state[symbol];
+  if (s.inPos) return;
+
+  const ok = await entrySignal(symbol);
+  if (!ok) return;
+
+  const quote = 'USDC';
+  const acc = await accountBalances();
+  const freeUSDC = acc[quote];
+
+  // alokacija po simbolu
+  const alloc = Math.max(0, Math.min(1, ALLOC_MAP[symbol] || 0));
+  if (alloc===0) return;
+
+  // koliko ulažemo (alokacija * invest_pct * slobodan USDC)
+  let spendUSDC = freeUSDC * alloc * INVEST_PCT;
+  if (!filtersCache[symbol]) filtersCache[symbol] = await getFilters(symbol);
+  const f = filtersCache[symbol];
+  if (spendUSDC < f.minNotional) return;
+
+  const p = await price(symbol);
+  let qty = spendUSDC / p;
+  qty = Math.max(f.minQty, roundStep(qty, f.stepSize));
+  if (qty*p < f.minNotional) return;
+
+  if (!LIVE){
+    s.inPos=true; s.entry=p; s.qty=qty; s.peak=p; s.trailStop=p*(1-TRAIL_PCT/100); s.tpPct=randTP();
+    console.log(`[DRY BUY] ${symbol} q=${qty} @ ${p} | TP=${s.tpPct.toFixed(2)}%`);
+    return;
   }
+
+  try{
+    const buy = await client.order({ symbol, side:'BUY', type:'MARKET', quantity:String(qty) });
+    const fillP = buy.fills && buy.fills.length
+      ? buy.fills.reduce((s,f)=>s+Number(f.price)*Number(f.qty),0) / buy.fills.reduce((s,f)=>s+Number(f.qty),0)
+      : p;
+
+    s.inPos=true; s.entry=fillP; s.qty=Number(buy.executedQty);
+    s.peak=fillP; s.trailStop=fillP*(1-TRAIL_PCT/100); s.tpPct=randTP();
+    s.tradesToday++;
+    console.log(`[BUY] ${symbol} qty=${s.qty} @ ${s.entry} | TP=${s.tpPct.toFixed(2)}%`);
+    sendAlert(`🟢 BUY ${symbol} @ ${fillP} | qty ${s.qty} | TP ${s.tpPct.toFixed(2)}%`);
+  }catch(e){ console.error('[BUY ERROR]', symbol, e.body||e.message||e); }
 }
 
-async function pollPositions(){
-  for (const sym of SYMBOLS) {
-    const p = await price(sym);
-    process.stdout.write(`\r[Heartbeat] ${sym}: ${p}   `);
+async function manageOpen(symbol){
+  const s = state[symbol];
+  if (!s.inPos) return;
+  const p = await price(symbol);
 
-    // trailing SL logika
-    if (pos[sym].in) {
-      pos[sym].trailTop = Math.max(pos[sym].trailTop, p);
-      const trailStop = pos[sym].trailTop * (1 - TRAIL_PCT/100);
-
-      // close by trailing?
-      if (p <= trailStop) {
-        await closeMarket(sym, p, 'TRAIL');
-      } else {
-        // close by TP % (soft check)
-        const up = pct(p, pos[sym].entry);
-        if (up >= pos[sym].tpPct) {
-          await closeMarket(sym, p, 'TP');
-        }
-      }
-    } else {
-      await entry(sym);
-    }
+  // trailing peak / stop
+  if (p > s.peak){
+    s.peak = p;
+    s.trailStop = s.peak * (1 - TRAIL_PCT/100);
   }
+
+  const hitTP = p >= s.entry * (1 + s.tpPct/100);
+  const hitSL = p <= s.entry * (1 - SL_PCT/100);
+  const hitTrail = p <= s.trailStop;
+
+  if (!(hitTP||hitSL||hitTrail)) return;
+
+  // sell market
+  if (!LIVE){
+    const exitP = p;
+    const pnl = pct(exitP, s.entry);
+    dailyPnL += pnl;
+    console.log(`[DRY CLOSE] ${symbol} PnL=${pnl.toFixed(2)}% | Daily=${dailyPnL.toFixed(2)}%`);
+    s.inPos=false; s.entry=0; s.qty=0; s.peak=0;
+    return;
+  }
+
+  try{
+    await client.order({ symbol, side:'SELL', type:'MARKET', quantity:String(s.qty) });
+    const exitP = p;
+    const pnl = pct(exitP, s.entry);
+    dailyPnL += pnl;
+    console.log(`[SELL] ${symbol} PnL=${pnl.toFixed(2)}% | Daily=${dailyPnL.toFixed(2)}%`);
+    sendAlert(`✅ CLOSE ${symbol} PnL=${pnl.toFixed(2)}% | Daily=${dailyPnL.toFixed(2)}%`);
+  }catch(e){ console.error('[SELL ERROR]', symbol, e.body||e.message||e); }
+  s.inPos=false; s.entry=0; s.qty=0; s.peak=0;
 }
 
-async function closeMarket(sym, px, reason){
-  try {
-    const { stepSize, minQty } = filters[sym];
-    const acc = await account();
-    const qtyFree = acc[sym].freeBase;
-    if (qtyFree < minQty/2) { pos[sym].in=false; return; }
-
-    let qty = roundStep(qtyFree, stepSize);
-    if (!LIVE) {
-      console.log(`\n[DRY SELL ${sym}] qty=${qty} @~${px} reason=${reason}`);
-    } else {
-      await client.order({ symbol:sym, side:'SELL', type:'MARKET', quantity:String(qty) });
-    }
-
-    const pnl = pct(px, pos[sym].entry);
-    todayPnlPct += pnl;
-    pos[sym] = { in:false, qty:0, entry:0, trailTop:0, tpPct:0 };
-    console.log(`\n[CLOSE ${sym}] reason=${reason} PnL=${pnl.toFixed(3)}% | Daily=${todayPnlPct.toFixed(3)}% | Trades=${tradesToday}`);
-
-  } catch (e) {
-    console.error('\n[SELL ERROR]', e.body||e.message||e);
-  }
-}
-
-// --- rebalans (koristi postojeći kapital) ---
-let lastReb = 0;
-async function maybeRebalance(){
-  const now = Date.now();
-  if (now - lastReb < REBALANCE_EVERY_SEC*1000) return;
-  lastReb = now;
-
-  const acc = await account();
-  // ukupna USDC vrijednost portfelja (USDC + vrijednost base)
-  let totalUSDC = acc.USDC;
-  const prices = {};
-  for (const s of SYMBOLS) {
-    prices[s] = await price(s);
-    totalUSDC += acc[s].freeBase * prices[s];
-  }
-  if (totalUSDC <= 0) return;
-
-  // cilj po simbolu
-  for (const s of SYMBOLS) {
-    const want = totalUSDC * TARGET_W[s];
-    const have = acc[s].freeBase * prices[s]; // vrijednost u USDC
-    const diffPct = pct(have, want);          // + znači imamo više od cilja
-    if (Math.abs(diffPct) < REBALANCE_TOLERANCE_P) continue;
-
-    // Ako imamo previše -> prodaj višak u USDC
-    if (diffPct > 0) {
-      const toSellUSDC = (have - want);
-      const qty = roundStep(toSellUSDC / prices[s], filters[s].stepSize);
-      if (qty * prices[s] >= filters[s].minNotional && qty >= filters[s].minQty) {
-        if (!LIVE) console.log(`\n[REB SELL ${s}] qty=${qty}`);
-        else await client.order({ symbol:s, side:'SELL', type:'MARKET', quantity:String(qty) });
-      }
-    } else { // premalo -> dokupimo iz USDC-a
-      const needUSDC = (want - have);
-      if (acc.USDC >= needUSDC) {
-        const qty = roundStep(needUSDC / prices[s], filters[s].stepSize);
-        if (qty * prices[s] >= filters[s].minNotional && qty >= filters[s].minQty) {
-          if (!LIVE) console.log(`\n[REB BUY ${s}] qty=${qty}`);
-          else await client.order({ symbol:s, side:'BUY', type:'MARKET', quantity:String(qty) });
-        }
-      }
-    }
-    await sleep(200);
-  }
-}
-
-// --- main loop ---
 async function loop(){
   try{
-    maybeResetDay();
-
-    const g = dayGuard();
-    if (g) { process.stdout.write(`\r${g}`); return; }
-
-    await pollPositions();
-    await maybeRebalance();
-  } catch(e){
+    resetDayIfNeeded();
+    for (const sym of SYMBOLS){
+      process.stdout.write(`\r[Heartbeat] ${sym}`);
+      if (!state[sym].inPos){
+        if (state[sym].tradesToday < MAX_TRADES_PER_DAY) await tryEnter(sym);
+      } else {
+        await manageOpen(sym);
+      }
+      await sleep(800); // kratka pauza po simbolu
+    }
+  }catch(e){
     console.error('\n[LOOP ERROR]', e.body||e.message||e);
   }
 }
 
-// ---- boot ----
-(async()=>{
-  console.log('[ENV] LIVE:', LIVE);
-  console.log('[ENV] SYMBOLS:', SYMBOLS.join(', '));
-  console.log('[ENV] TARGET_W:', TARGET_W);
-  console.log('[ENV] TP range %:', TP_MIN, '-', TP_MAX, '| trail %:', TRAIL_PCT, '| hard SL %:', HARD_SL_PCT);
-  console.log('[ENV] POS % of USDC:', POSITION_SIZE_PCT);
-  console.log('[ENV] Daily target %:', DAILY_TARGET_PCT, '| NoRedDay:', NO_NEG_DAY, '| MaxTrades:', MAX_TRADES_PER_DAY);
-  console.log('[ENV] Rebalance each s:', REBALANCE_EVERY_SEC, '| tolerance %:', REBALANCE_TOLERANCE_P);
+// ====== Boot ======
+(async ()=>{
+  console.log('[ENV] LIVE:',LIVE);
+  console.log('[ENV] SYMBOLS:',SYMBOLS.join(', '));
+  console.log('[ENV] ALLOC_PCT:',ALLOC_MAP);
+  console.log('[ENV] INVEST_PCT:', INVEST_PCT);
+  console.log('[ENV] TP range:', TP_MIN,'–',TP_MAX,'% | SL:',SL_PCT,'%', '| TRAIL:',TRAIL_PCT,'%');
+  console.log('[ENV] DailyTarget:', DAILY_TARGET_PCT, '% | NoRedDay:', NO_NEG_DAY, '| MaxTrades:', MAX_TRADES_PER_DAY);
 
-  await loadFilters();
+  for (const s of SYMBOLS){ filtersCache[s]=await getFilters(s); }
+
   setInterval(loop, 2500);
+  sendAlert(`🤖 Start multi-bot (${SYMBOLS.join(', ')})`);
 })();
-http.createServer((req,res)=>res.end('bot running')).listen(process.env.PORT||8080);
+
+// Keep-alive za Railway
+http.createServer((req,res)=>res.end('OK')).listen(process.env.PORT||8080);
+
+// Restart na hard greške (da se Railway automatski podigne)
+process.on('uncaughtException', async (e)=>{ await sendAlert('⛔ uncaught: '+(e?.message||e)); process.exit(1); });
