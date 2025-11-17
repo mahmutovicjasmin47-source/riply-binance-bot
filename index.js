@@ -1,22 +1,18 @@
-// index.js – safe-aggressive scalping bot za jedan simbol (BTCUSDC / ETHUSDC / BNBUSDC)
-// koristi env varijable za sve parametre (SL, TP, position size, target, ...)
-
-const http = require('http');
-const PORT = process.env.PORT || 3000;
+// index.js – scalping bot sa AUTO-RESETOM starih pozicija
 
 const Binance = require('binance-api-node').default;
 
-// ===== ENV VARIJABLE =====
+// ===== ENV varijable =====
 const {
   BINANCE_API_KEY,
   BINANCE_API_SECRET,
 
-  SYMBOL = 'BTCUSDC',
+  SYMBOL = 'BTCUSDC',        // npr. BTCUSDC / ETHUSDC / BNBUSDC
+  POSITION_ASSET = 'BTC',    // BTC ili ETH ili BNB (zavisno od servisa)
   LIVE_TRADING = 'false',
 
   STOP_LOSS_PCT = '0.5',
-
-  TAKE_PROFIT_PCT = '0.12', // informativno
+  TAKE_PROFIT_PCT = '0.12',
   TP_LOW_PCT = '0.08',
   TP_HIGH_PCT = '0.14',
 
@@ -28,10 +24,13 @@ const {
   TRAILING_STOP = 'true',
   TRAIL_STEP_PCT = '0.05',
 
-  NO_NEGATIVE_DAY = 'false'
+  NO_NEGATIVE_DAY = 'false',
+
+  // 🔥 NOVO: reset starih pozicija
+  RESET_MODE = 'true'
 } = process.env;
 
-// --- konverzija env vrijednosti ---
+// konverzija
 const liveTrading     = LIVE_TRADING === 'true';
 const stopLossPct     = parseFloat(STOP_LOSS_PCT);
 const takeProfitPct   = parseFloat(TAKE_PROFIT_PCT);
@@ -44,94 +43,97 @@ const slStartPct      = parseFloat(SL_START_PCT);
 const trailingStop    = TRAILING_STOP === 'true';
 const trailStepPct    = parseFloat(TRAIL_STEP_PCT);
 const noNegativeDay   = NO_NEGATIVE_DAY === 'true';
+const resetMode       = RESET_MODE === 'true';
 
-// ===== CONFIG ZA SIGNALE =====
+// ===== safe-aggressive config za signale =====
 const SIGNAL_CFG = {
   intervalMs:     10000,   // 10s između analiza
   volMin:         0.0005,  // 0.05% min volatilnost
-  volMax:         0.0100,  // 1.00% max (previše ludo -> ne radi)
-  slopeFastBuy:   0.0007,  // +0.07% u ~10 minuta
+  volMax:         0.0100,  // 1.00% max
+  slopeFastBuy:   0.0007,  // +0.07% ~10 min
   slopeFastSell: -0.0007,  // -0.07%
-  slopeSlowBuy:   0.0003,  // +0.03% u ~30 minuta
+  slopeSlowBuy:   0.0003,  // +0.03% ~30 min
   slopeSlowSell: -0.0003,  // -0.03%
-  maxRet10Abs:    0.0040,  // ako 10-min pomak > 0.4% -> skip
-  maxRet30Abs:    0.0080   // ako 30-min pomak > 0.8% -> skip
+  maxRet10Abs:    0.0040,  // >0.4% u 10m -> skip
+  maxRet30Abs:    0.0080   // >0.8% u 30m -> skip
 };
 
-// ===== BINANCE CLIENT =====
+// ===== Binance client =====
 const client = Binance({
   apiKey: BINANCE_API_KEY,
   apiSecret: BINANCE_API_SECRET
 });
 
-// ===== STANJE =====
+// ===== stanje =====
 let openPosition = null; // { side, entryPrice, qty, ... }
 let dailyPnlPct = 0;
 let tradesToday = 0;
 let lastDay = null;
+let lastPing = Date.now();
 
-// ===== HELPER FUNKCIJE =====
 function getDateKey() {
   return new Date().toISOString().slice(0, 10);
 }
-
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
+async function getAccountInfo() {
+  return client.accountInfo();
+}
+
+async function getBalance(asset) {
+  const info = await getAccountInfo();
+  const b = info.balances.find(x => x.asset === asset);
+  return b ? parseFloat(b.free) : 0;
+}
+
 async function getAccountBalanceUSDC() {
-  const accountInfo = await client.accountInfo();
-  const usdc = accountInfo.balances.find(b => b.asset === 'USDC');
-  return usdc ? parseFloat(usdc.free) : 0;
+  return getBalance('USDC');
 }
 
-// količina po simbolu (stepSize hardkodovan za BTC/ETH/BNB)
-function formatQty(symbol, qty) {
-  let step;
+// 🔥 NOVO: AUTO-RESET postojećih pozicija u tom coinu
+let resetDone = false;
 
-  if (symbol.startsWith('BTC')) step = 0.00001;      // BTCUSDC
-  else if (symbol.startsWith('ETH')) step = 0.0001;  // ETHUSDC
-  else if (symbol.startsWith('BNB')) step = 0.001;   // BNBUSDC
-  else step = 0.00001;
+async function autoResetOldPosition() {
+  if (!resetMode || resetDone) return;
 
-  const precision = (step.toString().split('.')[1] || '').length;
-  const factor = Math.pow(10, precision);
-
-  const floored = Math.floor(qty * factor) / factor;
-  return floored.toFixed(precision);
-}
-
-// ===== ANTI-DUMP FILTER =====
-// gleda zadnje 2 × 1m svijeće – ako druga svijeća padne >0.4% -> ne ulazi
-async function checkForDump(symbol) {
-  try {
-    const candles = await client.candles({
-      symbol,
-      interval: '1m',
-      limit: 2
-    });
-
-    if (!candles || candles.length < 2) return false;
-
-    const prev = parseFloat(candles[0].close);
-    const last = parseFloat(candles[1].close);
-
-    const dropPct = (last - prev) / prev * 100;
-
-    const isDump = dropPct <= -0.4;
-    if (isDump) {
-      log(`checkForDump: DETEKTOVAN dump na ${symbol} (drop=${dropPct.toFixed(2)}%) -> ne ulazim.`);
-    }
-    return isDump;
-  } catch (err) {
-    log('Greška u checkForDump:', err.message || err);
-    return false;
+  const freeAsset = await getBalance(POSITION_ASSET);
+  if (freeAsset <= 0) {
+    resetDone = true; // nema šta da se resetuje
+    return;
   }
+
+  log(`RESET_MODE: pronađen postojeći balans ${POSITION_ASSET} = ${freeAsset}. Prodajem u USDC...`);
+
+  if (liveTrading) {
+    try {
+      await client.order({
+        symbol: SYMBOL,
+        side: 'SELL',
+        type: 'MARKET',
+        quantity: freeAsset.toFixed(6)
+      });
+      log('RESET_MODE: SELL order poslan.');
+    } catch (err) {
+      console.error('RESET_MODE: greška pri slanju SELL order-a:', err.message || err);
+    }
+  } else {
+    log('(SIMULACIJA) RESET_MODE: ne šaljem pravi SELL order.');
+  }
+
+  resetDone = true;
 }
 
-// ===== GLAVNI DIO: ANALIZA + TRADE =====
+// ===== glavni dio: analiza + trade =====
 async function analyzeAndTrade() {
   try {
+    const now = Date.now();
+    if (now - lastPing > 60000) {
+      log('KEEPALIVE ping — bot je živ.');
+      lastPing = now;
+    }
+
     const today = getDateKey();
     if (lastDay !== today) {
       lastDay = today;
@@ -139,6 +141,9 @@ async function analyzeAndTrade() {
       dailyPnlPct = 0;
       log('--- Novi dan, reset brojača ---');
     }
+
+    // prvo PRODAJ stare pozicije (reset)
+    await autoResetOldPosition();
 
     if (dailyPnlPct >= dailyTargetPct) {
       log('DAILY TARGET dostignut, pauza za danas. PnL% =', dailyPnlPct.toFixed(2));
@@ -155,7 +160,6 @@ async function analyzeAndTrade() {
       return;
     }
 
-    // uzimamo 30 × 1m candle (30 minuta)
     const candles = await client.candles({ symbol: SYMBOL, interval: '1m', limit: 30 });
     if (!candles || candles.length < 10) {
       log('Premalo candle podataka.');
@@ -174,29 +178,21 @@ async function analyzeAndTrade() {
     const low30  = Math.min(...closes);
     const vol30  = (high30 - low30) / lastClose;
 
-    // mikro risk filter: ignoriramo mrtvo i ultra-ludo tržište
     if (vol30 < SIGNAL_CFG.volMin || vol30 > SIGNAL_CFG.volMax) {
-      log(`Volatilnost out-of-range: ${(vol30 * 100).toFixed(2)}% -> skip.`);
+      log(`Volatilnost out-of-range: ${(vol30*100).toFixed(2)}% -> skip.`);
       return;
     }
 
-    // dodatni filter: ako je već lud nagib, ne ulazi
     if (Math.abs(ret10) > SIGNAL_CFG.maxRet10Abs || Math.abs(ret30) > SIGNAL_CFG.maxRet30Abs) {
-      log(`Previše jak nagib (ret10=${(ret10 * 100).toFixed(2)}%, ret30=${(ret30 * 100).toFixed(2)}%), skip.`);
+      log(`Previše jak nagib (ret10=${(ret10*100).toFixed(2)}%, ret30=${(ret30*100).toFixed(2)}%), skip.`);
       return;
     }
 
-    // ako imamo već otvorenu poziciju, prvo njom upravljamo
     if (openPosition) {
       await manageOpenPosition(lastClose);
       return;
     }
 
-    // ANTI-DUMP – prije ulaza provjeri da nema svježeg pada
-    const isDump = await checkForDump(SYMBOL);
-    if (isDump) return;
-
-    // *** NEMA pozicije -> tražimo ulaz ***
     const strongUp =
       ret10 >= SIGNAL_CFG.slopeFastBuy &&
       ret30 >= SIGNAL_CFG.slopeSlowBuy;
@@ -205,7 +201,7 @@ async function analyzeAndTrade() {
       ret10 <= SIGNAL_CFG.slopeFastSell &&
       ret30 <= SIGNAL_CFG.slopeSlowSell;
 
-    log(`Analiza ${SYMBOL}: ret10=${(ret10 * 100).toFixed(3)}% ret30=${(ret30 * 100).toFixed(3)}% vol30=${(vol30 * 100).toFixed(2)}%`);
+    log(`Analiza ${SYMBOL}: ret10=${(ret10*100).toFixed(3)}% ret30=${(ret30*100).toFixed(3)}% vol30=${(vol30*100).toFixed(2)}%`);
 
     if (strongUp && !strongDown) {
       await openTrade('BUY', lastClose);
@@ -220,13 +216,13 @@ async function analyzeAndTrade() {
   }
 }
 
-// ===== OTVARANJE TRADE-A =====
+// ===== otvaranje trade-a =====
 async function openTrade(side, price) {
   if (tradesToday >= maxTradesPerDay) return;
 
   const balanceUSDC = await getAccountBalanceUSDC();
-  if (balanceUSDC <= 0) {
-    log('Nema USDC balansa za otvaranje pozicije.');
+  if (balanceUSDC <= 5) {
+    log('Premali balans/pozicija (ispod 5 USDC).');
     return;
   }
 
@@ -236,17 +232,10 @@ async function openTrade(side, price) {
     return;
   }
 
-  const rawQty = usedUSDC / price;
-  const qtyStr = formatQty(SYMBOL, rawQty);
-  const qty = parseFloat(qtyStr);
-
-  if (qty <= 0) {
-    log('Izračunata količina je 0, skip.');
-    return;
-  }
-
+  const qty = usedUSDC / price;
   tradesToday += 1;
-  log(`OTVARANJE ${side} pozicije: qty=${qtyStr} @ ${price}`);
+
+  log(`OTVARANJE ${side} pozicije: qty=${qty.toFixed(6)} @ ${price}`);
 
   if (liveTrading) {
     try {
@@ -254,7 +243,7 @@ async function openTrade(side, price) {
         symbol: SYMBOL,
         side,
         type: 'MARKET',
-        quantity: qtyStr
+        quantity: qty.toFixed(6)
       });
     } catch (err) {
       console.error('Greška pri slanju ORDER-a:', err.message || err);
@@ -270,15 +259,15 @@ async function openTrade(side, price) {
     qty,
     highest: price,
     lowest: price,
-    tpLow:  price * (1 + (side === 'BUY' ?  tpLowPct  / 100 : -tpLowPct  / 100)),
-    tpHigh: price * (1 + (side === 'BUY' ?  tpHighPct / 100 : -tpHighPct / 100)),
-    slHard: price * (1 + (side === 'BUY' ? -stopLossPct / 100 :  stopLossPct / 100)),
+    tpLow:  price * (1 + (side === 'BUY' ?  tpLowPct/100 : -tpLowPct/100)),
+    tpHigh: price * (1 + (side === 'BUY' ?  tpHighPct/100 : -tpHighPct/100)),
+    slHard: price * (1 + (side === 'BUY' ? -stopLossPct/100 :  stopLossPct/100)),
     trailingActive: false,
     trailingStopPrice: null
   };
 }
 
-// ===== UPRAVLJANJE OTVORENOM POZICIJOM =====
+// ===== upravljanje otvorenom pozicijom =====
 async function manageOpenPosition(lastPrice) {
   const pos = openPosition;
   if (!pos) return;
@@ -293,25 +282,23 @@ async function manageOpenPosition(lastPrice) {
 
   const movePct = (lastPrice - pos.entryPrice) / pos.entryPrice * (pos.side === 'BUY' ? 100 : -100);
 
-  // aktiviraj trailing kada smo dovoljno u plusu
   if (!pos.trailingActive && trailingStop && movePct >= slStartPct) {
     pos.trailingActive = true;
     pos.trailingStopPrice = pos.side === 'BUY'
-      ? lastPrice * (1 - trailStepPct / 100)
-      : lastPrice * (1 + trailStepPct / 100);
+      ? lastPrice * (1 - trailStepPct/100)
+      : lastPrice * (1 + trailStepPct/100);
     log('Trailing stop AKTIVIRAN @', pos.trailingStopPrice.toFixed(2));
   }
 
-  // ažuriraj trailing stop
   if (pos.trailingActive && pos.trailingStopPrice) {
     if (pos.side === 'BUY') {
-      const candidate = lastPrice * (1 - trailStepPct / 100);
+      const candidate = lastPrice * (1 - trailStepPct/100);
       if (candidate > pos.trailingStopPrice) {
         pos.trailingStopPrice = candidate;
         log('Trailing stop BUY pomjeren @', pos.trailingStopPrice.toFixed(2));
       }
     } else {
-      const candidate = lastPrice * (1 + trailStepPct / 100);
+      const candidate = lastPrice * (1 + trailStepPct/100);
       if (candidate < pos.trailingStopPrice) {
         pos.trailingStopPrice = candidate;
         log('Trailing stop SELL pomjeren @', pos.trailingStopPrice.toFixed(2));
@@ -319,7 +306,6 @@ async function manageOpenPosition(lastPrice) {
     }
   }
 
-  // HARD SL
   if ((pos.side === 'BUY'  && lastPrice <= pos.slHard) ||
       (pos.side === 'SELL' && lastPrice >= pos.slHard)) {
     log('HARD SL pogođen.');
@@ -327,7 +313,6 @@ async function manageOpenPosition(lastPrice) {
     return;
   }
 
-  // TRAILING SL
   if (pos.trailingActive && pos.trailingStopPrice) {
     if ((pos.side === 'BUY'  && lastPrice <= pos.trailingStopPrice) ||
         (pos.side === 'SELL' && lastPrice >= pos.trailingStopPrice)) {
@@ -337,7 +322,6 @@ async function manageOpenPosition(lastPrice) {
     }
   }
 
-  // TP zona
   const hitLow = pos.side === 'BUY'
     ? lastPrice >= pos.tpLow
     : lastPrice <= pos.tpLow;
@@ -355,7 +339,7 @@ async function manageOpenPosition(lastPrice) {
   }
 }
 
-// ===== ZATVARANJE POZICIJE =====
+// ===== zatvaranje pozicije =====
 async function closePosition(price, reason) {
   const pos = openPosition;
   if (!pos) return;
@@ -364,14 +348,11 @@ async function closePosition(price, reason) {
 
   if (liveTrading) {
     try {
-      const closeSide = pos.side === 'BUY' ? 'SELL' : 'BUY';
-      const qtyStr = formatQty(SYMBOL, pos.qty);
-
       await client.order({
         symbol: SYMBOL,
-        side: closeSide,
+        side: pos.side === 'BUY' ? 'SELL' : 'BUY',
         type: 'MARKET',
-        quantity: qtyStr
+        quantity: pos.qty.toFixed(6)
       });
     } catch (err) {
       console.error('Greška pri zatvaranju ORDER-a:', err.message || err);
@@ -387,23 +368,10 @@ async function closePosition(price, reason) {
   openPosition = null;
 }
 
-// ===== KEEP-ALIVE SERVER ZA RAILWAY =====
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK\n');
-}).listen(PORT, () => {
-  log('Keep-alive server sluša na portu', PORT);
-});
-
-setInterval(() => {
-  log('KEEPALIVE ping – bot je živ.');
-}, 4 * 60 * 1000); // svakih 4 minute
-
-// ===== GLAVNI LOOP =====
+// ===== glavni loop =====
 async function mainLoop() {
   await analyzeAndTrade();
 }
 
-// start
-log('Bot startan za simbol', SYMBOL, '| liveTrading =', liveTrading, '| posSizePct =', posSizePct);
+log('Bot startan za simbol', SYMBOL, '| liveTrading =', liveTrading, '| resetMode =', resetMode);
 setInterval(mainLoop, SIGNAL_CFG.intervalMs);
