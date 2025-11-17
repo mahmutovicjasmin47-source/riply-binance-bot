@@ -1,13 +1,13 @@
 {
   "name": "riply-binance-bot",
   "version": "1.0.0",
+  "description": "Safe-aggressive scalping bot for Binance",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
+  "license": "MIT",
   "dependencies": {
-    "binance-api-node": "^0.12.0",
-    "dotenv": "^16.4.5"
+    "binance-api-node": "^0.11.21"
   }
 }
