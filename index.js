@@ -1,4 +1,8 @@
-// index.js – safe-aggressive scalping bot za 1 simbol (Railway backend)
+// index.js – safe-aggressive scalping bot za jedan simbol (BTCUSDC / ETHUSDC / BNBUSDC)
+// koristi env varijable za sve parametre (SL, TP, position size, target, ...)
+
+const http = require('http');
+const PORT = process.env.PORT || 3000;
 
 const Binance = require('binance-api-node').default;
 
@@ -12,16 +16,15 @@ const {
 
   STOP_LOSS_PCT = '0.5',
 
-  // koristiš TP_LOW_PCT i TP_HIGH_PCT za dvije target zone
-  TAKE_PROFIT_PCT = '0.12', // opcionalno, za info
+  TAKE_PROFIT_PCT = '0.12', // informativno
   TP_LOW_PCT = '0.08',
   TP_HIGH_PCT = '0.14',
 
   DAILY_TARGET_PCT = '25.0',
   MAX_TRADES_PER_DAY = '80',
-  POSITION_SIZE_PCT = '0.60', // koliko % USDC ulažeš po trade-u
+  POSITION_SIZE_PCT = '0.60',
 
-  SL_START_PCT = '0.10',      // kad smo ovoliko u plusu, pali trailing
+  SL_START_PCT = '0.10',
   TRAILING_STOP = 'true',
   TRAIL_STEP_PCT = '0.05',
 
@@ -31,7 +34,7 @@ const {
 // --- konverzija env vrijednosti ---
 const liveTrading     = LIVE_TRADING === 'true';
 const stopLossPct     = parseFloat(STOP_LOSS_PCT);
-const takeProfitPct   = parseFloat(TAKE_PROFIT_PCT); // samo informativno
+const takeProfitPct   = parseFloat(TAKE_PROFIT_PCT);
 const tpLowPct        = parseFloat(TP_LOW_PCT);
 const tpHighPct       = parseFloat(TP_HIGH_PCT);
 const dailyTargetPct  = parseFloat(DAILY_TARGET_PCT);
@@ -82,19 +85,24 @@ async function getAccountBalanceUSDC() {
   return usdc ? parseFloat(usdc.free) : 0;
 }
 
-// koliko decimala smijemo za qty (grubo po simbolu)
+// količina po simbolu (stepSize hardkodovan za BTC/ETH/BNB)
 function formatQty(symbol, qty) {
-  let decimals = 6;
-  if (symbol.startsWith('BNB')) decimals = 3;      // BNBUSDC
-  else if (symbol.startsWith('ETH')) decimals = 5; // ETHUSDC
-  // BTC ostaje 6
-  const factor = Math.pow(10, decimals);
+  let step;
+
+  if (symbol.startsWith('BTC')) step = 0.00001;      // BTCUSDC
+  else if (symbol.startsWith('ETH')) step = 0.0001;  // ETHUSDC
+  else if (symbol.startsWith('BNB')) step = 0.001;   // BNBUSDC
+  else step = 0.00001;
+
+  const precision = (step.toString().split('.')[1] || '').length;
+  const factor = Math.pow(10, precision);
+
   const floored = Math.floor(qty * factor) / factor;
-  return floored.toFixed(decimals);
+  return floored.toFixed(precision);
 }
 
-// ===== ANTI-DUMP FILTER (ISPRAVLJEN) =====
-// gleda zadnje 2 × 1m svijeće – ako druga svijeća padne npr. >0.4% -> dump
+// ===== ANTI-DUMP FILTER =====
+// gleda zadnje 2 × 1m svijeće – ako druga svijeća padne >0.4% -> ne ulazi
 async function checkForDump(symbol) {
   try {
     const candles = await client.candles({
@@ -110,14 +118,13 @@ async function checkForDump(symbol) {
 
     const dropPct = (last - prev) / prev * 100;
 
-    // dump ako je pad manji ili jednak -0.4%
     const isDump = dropPct <= -0.4;
     if (isDump) {
       log(`checkForDump: DETEKTOVAN dump na ${symbol} (drop=${dropPct.toFixed(2)}%) -> ne ulazim.`);
     }
     return isDump;
   } catch (err) {
-    console.log('Greška u checkForDump:', err.message || err);
+    log('Greška u checkForDump:', err.message || err);
     return false;
   }
 }
@@ -187,9 +194,7 @@ async function analyzeAndTrade() {
 
     // ANTI-DUMP – prije ulaza provjeri da nema svježeg pada
     const isDump = await checkForDump(SYMBOL);
-    if (isDump) {
-      return; // ne ulazimo u trade odmah nakon dump-a
-    }
+    if (isDump) return;
 
     // *** NEMA pozicije -> tražimo ulaz ***
     const strongUp =
@@ -253,7 +258,6 @@ async function openTrade(side, price) {
       });
     } catch (err) {
       console.error('Greška pri slanju ORDER-a:', err.message || err);
-      // ako order faila, ne pravimo openPosition
       return;
     }
   } else {
@@ -382,6 +386,18 @@ async function closePosition(price, reason) {
 
   openPosition = null;
 }
+
+// ===== KEEP-ALIVE SERVER ZA RAILWAY =====
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OK\n');
+}).listen(PORT, () => {
+  log('Keep-alive server sluša na portu', PORT);
+});
+
+setInterval(() => {
+  log('KEEPALIVE ping – bot je živ.');
+}, 4 * 60 * 1000); // svakih 4 minute
 
 // ===== GLAVNI LOOP =====
 async function mainLoop() {
