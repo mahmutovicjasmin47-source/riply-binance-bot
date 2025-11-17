@@ -65,6 +65,10 @@ let dailyPnlPct = 0;
 let tradesToday = 0;
 let lastDay = null;
 
+// ===== Anti-dump stanje =====
+let dumpProtectionActive = false;
+let dumpCooldownUntil = 0; // timestamp dokle traje pauza
+
 function getDateKey() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -77,6 +81,38 @@ async function getAccountBalanceUSDC() {
   const accountInfo = await client.accountInfo();
   const usdc = accountInfo.balances.find(b => b.asset === 'USDC');
   return usdc ? parseFloat(usdc.free) : 0;
+}
+
+// ===== Anti-dump provjera (nagao pad cijene u kratkom roku) =====
+async function checkForDump(symbol) {
+  try {
+    // zadnjih 6 minuta (0..5) – interval 1m
+    const candles = await client.klines({
+      symbol,
+      interval: '1m',
+      limit: 6
+    });
+
+    if (!candles || candles.length < 6) return;
+
+    const openPrice = parseFloat(candles[0][1]); // open prije ~5 min
+    const lastPrice = parseFloat(candles[5][4]); // zadnji close
+
+    const dropPct = ((lastPrice - openPrice) / openPrice) * 100;
+
+    // ako je u ~5 minuta pad veći od -3%
+    if (dropPct <= -3) {
+      dumpProtectionActive = true;
+      dumpCooldownUntil = Date.now() + 60 * 60 * 1000; // pauza 60 min
+      log(
+        `🚨 ANTI-DUMP ACTIVE: tržište palo ${dropPct.toFixed(
+          2
+        )}% u 5 min – pauziram trgovanje na 60 min.`
+      );
+    }
+  } catch (err) {
+    log('Greška u checkForDump:', err.message || err);
+  }
 }
 
 // ===== glavni dio: analiza + trade =====
@@ -104,6 +140,20 @@ async function analyzeAndTrade() {
       log('MAX_TRADES_PER_DAY dostignut, pauza za danas.');
       return;
     }
+
+    // ===== Anti-dump check prije bilo kakve analize =====
+    await checkForDump(SYMBOL);
+
+    if (dumpProtectionActive) {
+      if (Date.now() < dumpCooldownUntil) {
+        log('⛔ Anti-dump aktivan – pauziram trgovanje dok se tržište ne smiri.');
+        return; // preskačemo ovaj ciklus
+      } else {
+        dumpProtectionActive = false;
+        log('✅ Anti-dump deaktiviran – nastavljam sa trgovanjem.');
+      }
+    }
+    // ===== kraj anti-dump dijela =====
 
     // uzimamo 30 × 1m candle (30 minuta)
     const candles = await client.candles({ symbol: SYMBOL, interval: '1m', limit: 30 });
