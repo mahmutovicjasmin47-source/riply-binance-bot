@@ -1,12 +1,14 @@
 import binance from "binance-api-node";
+const Binance = binance.default || binance;
 
-const client = binance.default({
+// ================== KONEKCIJA ==================
+const client = Binance({
   apiKey: process.env.BINANCE_KEY,
   apiSecret: process.env.BINANCE_SECRET
 });
 
 // ================== KONFIG ==================
-const PAIR = "BTCUSDC";
+const PAIR = process.env.SYMBOL || "BTCUSDC";
 
 // Kapital
 const CAPITAL_PERCENT = 0.60;        // 60% balansa po ulazu
@@ -175,7 +177,6 @@ async function handleOpenPosition(pos, price) {
 
         console.log(`💰 PROFIT SELL: ${(pnl*100).toFixed(2)}%`);
 
-        // auto increase uloga
         stakeMultiplier = Math.min(
           stakeMultiplier * (1 + AUTO_INCREASE),
           MAX_MULTIPLIER
