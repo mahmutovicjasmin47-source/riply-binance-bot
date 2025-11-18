@@ -1,13 +1,13 @@
 {
-  "name": "riply-binance-bot",
+  "name": "btc-aggressive-safe-v3",
   "version": "1.0.0",
-  "description": "Safe-aggressive scalping bot for Binance",
+  "description": "BTCUSDC Aggressive Safe Scalper v3 (1s loop, trailing, anti-crash, auto-increase)",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
-  "license": "MIT",
   "dependencies": {
-    "binance-api-node": "^0.11.21"
+    "binance-api-node": "^0.12.0"
   }
 }
