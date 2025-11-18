@@ -1,12 +1,6 @@
-{
-  "name": "btc-aggressive-safe-v3",
-  "version": "1.0.0",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "binance-api-node": "^0.12.5"
-  }
-}
+import { default as Binance } from "binance-api-node";
+
+const client = Binance({
+  apiKey: process.env.BINANCE_KEY,
+  apiSecret: process.env.BINANCE_SECRET
+});
