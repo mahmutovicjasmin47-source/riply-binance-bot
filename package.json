@@ -1,16 +1,12 @@
 {
-  "name": "riply-binance-bot",
+  "name": "ripl-bot",
   "version": "1.0.0",
-  "description": "BTCUSDC aggressive safe scalper bot",
-  "main": "index.js",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "binance-api-node": "^0.12.3"
-  },
-  "engines": {
-    "node": ">=18"
+    "binance-api-node": "^0.12.7"
   }
 }
