@@ -1,9 +1,8 @@
 {
-  "name": "ai_scalper_v7",
+  "name": "ai-scalper-v7",
   "version": "1.0.0",
-  "description": "AI Ultra Intelligent Crypto Scalper Bot V7",
+  "description": "AI Ultra Intelligent Crypto Scalper Bot V7 - Railway Deployment",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
