@@ -1,6 +1,16 @@
-import { default as Binance } from "binance-api-node";
-
-const client = Binance({
-  apiKey: process.env.BINANCE_KEY,
-  apiSecret: process.env.BINANCE_SECRET
-});
+{
+  "name": "riply-binance-bot",
+  "version": "1.0.0",
+  "description": "BTCUSDC aggressive safe scalper bot",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "binance-api-node": "^0.12.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
