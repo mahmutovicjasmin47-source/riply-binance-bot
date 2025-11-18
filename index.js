@@ -1,399 +1,228 @@
-// index.js – BTCUSDC scalping bot (jedan bot, LOT_SIZE fix)
+import Binance from "binance-api-node"
 
-const Binance = require('binance-api-node').default;
-
-// ===== ENV VARIJALE =====
-const {
-  BINANCE_API_KEY,
-  BINANCE_API_SECRET,
-
-  SYMBOL = 'BTCUSDC',
-  LIVE_TRADING = 'false',
-
-  STOP_LOSS_PCT = '0.6',
-  TAKE_PROFIT_PCT = '0.12',
-  TP_LOW_PCT = '0.08',
-  TP_HIGH_PCT = '0.16',
-
-  DAILY_TARGET_PCT = '20.0',
-  MAX_TRADES_PER_DAY = '60',
-  POSITION_SIZE_PCT = '0.60',
-
-  SL_START_PCT = '0.12',
-  TRAILING_STOP = 'true',
-  TRAIL_STEP_PCT = '0.05',
-
-  NO_NEGATIVE_DAY = 'false',
-  MIN_USDC_POSITION = '5'
-} = process.env;
-
-// konverzija u brojeve
-const liveTrading     = LIVE_TRADING === 'true';
-const stopLossPct     = parseFloat(STOP_LOSS_PCT);
-const takeProfitPct   = parseFloat(TAKE_PROFIT_PCT);
-const tpLowPct        = parseFloat(TP_LOW_PCT);
-const tpHighPct       = parseFloat(TP_HIGH_PCT);
-const dailyTargetPct  = parseFloat(DAILY_TARGET_PCT);
-const maxTradesPerDay = parseInt(MAX_TRADES_PER_DAY, 10);
-const posSizePct      = parseFloat(POSITION_SIZE_PCT);
-const slStartPct      = parseFloat(SL_START_PCT);
-const trailingStop    = TRAILING_STOP === 'true';
-const trailStepPct    = parseFloat(TRAIL_STEP_PCT);
-const noNegativeDay   = NO_NEGATIVE_DAY === 'true';
-const minUsdcPosition = parseFloat(MIN_USDC_POSITION) || 5;
-
-// ===== signal konfiguracija (sigurni/agresivni scalping) =====
-const SIGNAL_CFG = {
-  intervalMs:     10000,    // 10 sekundi između analiza
-  volMin:         0.0005,   // 0.05% minimalna volatilnost
-  volMax:         0.0150,   // 1.50% max (previše ludo -> skip)
-  slopeFastBuy:   0.0007,   // +0.07% u ~10 minuta
-  slopeFastSell: -0.0007,   // -0.07%
-  slopeSlowBuy:   0.0003,   // +0.03% u ~30 minuta
-  slopeSlowSell: -0.0003,   // -0.03%
-  maxRet10Abs:    0.0040,   // ako 10-min pomak > 0.4% -> preskoči
-  maxRet30Abs:    0.0100    // ako 30-min pomak > 1.0% -> preskoči
-};
-
-// ===== Binance client =====
 const client = Binance({
-  apiKey: BINANCE_API_KEY,
-  apiSecret: BINANCE_API_SECRET
-});
+  apiKey: process.env.BINANCE_KEY,
+  apiSecret: process.env.BINANCE_SECRET
+})
 
-// exchangeInfo filteri (LOT_SIZE, MIN_NOTIONAL) za SYMBOL
-let symbolFilters = null;
+// ================== KONFIG ==================
+const PAIR = "BTCUSDC"
 
-// stanje
-let openPosition = null; // { side, entryPrice, qty, highest, lowest, ... }
-let dailyPnlPct = 0;
-let tradesToday = 0;
-let lastDay = null;
+// Kapital
+const CAPITAL_PERCENT = 0.60        // 60% balansa po ulazu
+const AUTO_INCREASE = 0.10          // +10% nakon profita
+const MAX_MULTIPLIER = 3            // sigurnosni max 3x
 
-function getDateKey() {
-  return new Date().toISOString().slice(0, 10);
+// Trailing logika
+const TRAIL_START = 0.003           // 0.3% profit -> uključi trailing
+const TRAIL_DISTANCE = 0.0025       // 0.25% ispod high-a
+
+// Rizik
+const STOP_LOSS = -0.01             // -1% hard SL
+
+// Anti-crash
+const CRASH_DROP = -0.02            // -2% u minuti
+const CRASH_WINDOW_MS = 60000       // 1 minut
+const CRASH_PAUSE_MIN = 5           // pauza 5 min
+
+// Ostalo
+const INTERVAL_MS = 1000            // 1 sekunda
+const MIN_POSITION_USDC = 25        // minimalni ulaz
+
+// ================== STATE ==================
+let stakeMultiplier = 1
+let trailingHigh = null
+let pauseUntil = 0
+let priceHistory = []
+
+// ================== UTILS ==================
+
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+async function getBalanceUSDC() {
+  const acc = await client.accountInfo()
+  const usdc = acc.balances.find(b => b.asset === "USDC")
+  return usdc ? parseFloat(usdc.free) : 0
 }
 
-function log(...args) {
-  console.log(new Date().toISOString(), '-', ...args);
+async function getPrice() {
+  const t = await client.prices({ symbol: PAIR })
+  return parseFloat(t[PAIR])
 }
 
-// učitavanje Binance filtera
-async function loadSymbolFilters() {
+async function getPosition() {
+  const trades = await client.myTrades({ symbol: PAIR })
+
+  if (!trades.length) return null
+
+  const buys = trades.filter(t => t.isBuyer)
+  const sells = trades.filter(t => !t.isBuyer)
+
+  const buyAmount = buys.reduce((a, t) => a + parseFloat(t.qty), 0)
+  const sellAmount = sells.reduce((a, t) => a + parseFloat(t.qty), 0)
+
+  const qty = buyAmount - sellAmount
+  if (qty <= 0) return null
+
+  const totalBuyCost = buys.reduce(
+    (a, t) => a + parseFloat(t.qty) * parseFloat(t.price),
+    0
+  )
+  const avg = totalBuyCost / buyAmount
+
+  return { qty, avgPrice: avg }
+}
+
+function updateCrashGuard(price) {
+  const now = Date.now()
+  priceHistory.push({ time: now, price })
+
+  priceHistory = priceHistory.filter(p => now - p.time <= CRASH_WINDOW_MS)
+
+  if (priceHistory.length < 2) return
+
+  const first = priceHistory[0]
+  const change = (price - first.price) / first.price
+
+  if (change <= CRASH_DROP) {
+    pauseUntil = now + CRASH_PAUSE_MIN * 60 * 1000
+    console.log(
+      `⚠️ CRASH DETECTED: pad ${(change*100).toFixed(2)}%, pauza ${CRASH_PAUSE_MIN} min`
+    )
+  }
+}
+
+// ================== BEZ POZICIJE ==================
+
+async function handleNoPosition(price) {
+  const now = Date.now()
+  if (now < pauseUntil) {
+    const left = ((pauseUntil - now) / 60000).toFixed(1)
+    console.log(`⏸ Pauza zbog anti-crash zaštite: još ~${left} min`)
+    return
+  }
+
+  const bal = await getBalanceUSDC()
+  const stake = bal * CAPITAL_PERCENT * stakeMultiplier
+
+  if (stake < MIN_POSITION_USDC) {
+    console.log(`Premalo za ulaz, balans=${bal.toFixed(2)} USDC`)
+    return
+  }
+
+  if (bal < stake) {
+    console.log(`Nema dovoljno balansa (${bal.toFixed(2)} < stake ${stake.toFixed(2)})`)
+    return
+  }
+
+  const qty = stake / price
+
   try {
-    const info = await client.exchangeInfo();
-    const s = info.symbols.find(x => x.symbol === SYMBOL);
-    if (!s) {
-      log('Nisam našao symbol u exchangeInfo:', SYMBOL);
-      return;
-    }
-    const lot = s.filters.find(f => f.filterType === 'LOT_SIZE');
-    const minNotional = s.filters.find(f => f.filterType === 'MIN_NOTIONAL');
+    await client.order({
+      symbol: PAIR,
+      side: "BUY",
+      type: "MARKET",
+      quantity: qty.toFixed(5)
+    })
 
-    symbolFilters = {
-      minQty: lot ? parseFloat(lot.minQty) : 0,
-      stepSize: lot ? parseFloat(lot.stepSize) : 0,
-      minNotional: minNotional ? parseFloat(minNotional.minNotional) : 0
-    };
+    trailingHigh = null
 
-    log('Učitan Binance filter za', SYMBOL, symbolFilters);
+    console.log(
+      `✅ BUY ${PAIR}: qty=${qty.toFixed(5)}, stake=${stake.toFixed(2)}, mult=${stakeMultiplier.toFixed(2)}`
+    )
   } catch (err) {
-    console.error('Greška u loadSymbolFilters:', err.message || err);
+    console.log("❌ BUY ERROR:", err.message)
   }
 }
 
-// za USDC balans
-async function getAccountBalanceUSDC() {
-  const accountInfo = await client.accountInfo();
-  const usdc = accountInfo.balances.find(b => b.asset === 'USDC');
-  return usdc ? parseFloat(usdc.free) : 0;
-}
+// ================== SA POZICIJOM ==================
 
-// prilagođavanje količine na LOT_SIZE
-function adjustQuantity(rawQty) {
-  if (!symbolFilters || !symbolFilters.stepSize || !symbolFilters.minQty) {
-    return rawQty;
-  }
-  let qty = rawQty;
+async function handleOpenPosition(pos, price) {
+  const pnl = (price - pos.avgPrice) / pos.avgPrice
 
-  if (qty < symbolFilters.minQty) {
-    qty = symbolFilters.minQty;
-  }
-
-  const step = symbolFilters.stepSize;
-  qty = Math.floor(qty / step) * step; // zaokruži dole na najbliži step
-
-  return qty;
-}
-
-// ===== glavna logika: analiza + trade =====
-async function analyzeAndTrade() {
-  try {
-    const today = getDateKey();
-    if (lastDay !== today) {
-      lastDay = today;
-      tradesToday = 0;
-      dailyPnlPct = 0;
-      log('--- Novi dan, reset brojača ---');
-    }
-
-    if (dailyPnlPct >= dailyTargetPct) {
-      log('DAILY TARGET dostignut, pauza za danas. PnL% =', dailyPnlPct.toFixed(2));
-      return;
-    }
-
-    if (noNegativeDay && dailyPnlPct <= -dailyTargetPct) {
-      log('NO_NEGATIVE_DAY aktivan, preveliki minus, pauza za danas. PnL% =', dailyPnlPct.toFixed(2));
-      return;
-    }
-
-    if (tradesToday >= maxTradesPerDay) {
-      log('MAX_TRADES_PER_DAY dostignut, pauza za danas.');
-      return;
-    }
-
-    // 30 × 1m candle (30 minuta)
-    const candles = await client.candles({ symbol: SYMBOL, interval: '1m', limit: 30 });
-    if (!candles || candles.length < 10) {
-      log('Premalo candle podataka.');
-      return;
-    }
-
-    const closes = candles.map(c => parseFloat(c.close));
-    const lastClose = closes[closes.length - 1];
-    const first10 = closes[closes.length - 10];
-    const first30 = closes[0];
-
-    const ret10 = (lastClose - first10) / first10;
-    const ret30 = (lastClose - first30) / first30;
-
-    const high30 = Math.max(...closes);
-    const low30  = Math.min(...closes);
-    const vol30  = (high30 - low30) / lastClose;
-
-    // filter volatilnosti
-    if (vol30 < SIGNAL_CFG.volMin || vol30 > SIGNAL_CFG.volMax) {
-      log(`Volatilnost out-of-range: ${(vol30*100).toFixed(2)}% -> skip.`);
-      return;
-    }
-
-    // filter za brutalne spike-ove
-    if (Math.abs(ret10) > SIGNAL_CFG.maxRet10Abs || Math.abs(ret30) > SIGNAL_CFG.maxRet30Abs) {
-      log(`Previše jak nagib (ret10=${(ret10*100).toFixed(2)}%, ret30=${(ret30*100).toFixed(2)}%), skip.`);
-      return;
-    }
-
-    // ako postoji otvorena pozicija -> prvo njome upravljamo
-    if (openPosition) {
-      await manageOpenPosition(lastClose);
-      return;
-    }
-
-    // nema pozicije -> tražimo ulaz
-    const strongUp =
-      ret10 >= SIGNAL_CFG.slopeFastBuy &&
-      ret30 >= SIGNAL_CFG.slopeSlowBuy;
-
-    const strongDown =
-      ret10 <= SIGNAL_CFG.slopeFastSell &&
-      ret30 <= SIGNAL_CFG.slopeSlowSell;
-
-    log(`Analiza ${SYMBOL}: ret10=${(ret10*100).toFixed(3)}% ret30=${(ret30*100).toFixed(3)}% vol30=${(vol30*100).toFixed(2)}%`);
-
-    if (strongUp && !strongDown) {
-      await openTrade('BUY', lastClose);
-    } else if (strongDown && !strongUp) {
-      await openTrade('SELL', lastClose);
-    } else {
-      log('Nema jasnog signala -> čekam.');
-    }
-
-  } catch (err) {
-    console.error('Greška u analyzeAndTrade:', err.message || err);
-  }
-}
-
-// ===== otvaranje trade-a =====
-async function openTrade(side, price) {
-  if (tradesToday >= maxTradesPerDay) return;
-
-  const balanceUSDC = await getAccountBalanceUSDC();
-  if (balanceUSDC <= 0) {
-    log('Nema USDC balansa za otvaranje pozicije.');
-    return;
-  }
-
-  const usedUSDCraw = balanceUSDC * posSizePct;
-  if (usedUSDCraw < minUsdcPosition) {
-    log('Premali balans/pozicija (ispod', minUsdcPosition, 'USDC).');
-    return;
-  }
-
-  let qty = usedUSDCraw / price;
-  qty = adjustQuantity(qty);
-
-  const notional = qty * price;
-  if (symbolFilters && symbolFilters.minNotional && notional < symbolFilters.minNotional) {
-    log(`Notional too small (${notional.toFixed(2)}), MIN_NOTIONAL=${symbolFilters.minNotional}, skip.`);
-    return;
-  }
-
-  tradesToday += 1;
-
-  log(`OTVARANJE ${side} pozicije: qty=${qty.toFixed(6)} @ ${price}`);
-
-  if (liveTrading) {
+  // STOP LOSS
+  if (pnl <= STOP_LOSS) {
     try {
       await client.order({
-        symbol: SYMBOL,
-        side,
-        type: 'MARKET',
-        quantity: qty.toFixed(6)
-      });
-    } catch (err) {
-      console.error('Greška pri slanju ORDER-a:', err.message || err);
-      return; // ne otvaraj lokalnu poziciju ako order nije prošao
+        symbol: PAIR,
+        side: "SELL",
+        type: "MARKET",
+        quantity: pos.qty.toFixed(5)
+      })
+      console.log(`🛑 SL SELL: gubitak ${(pnl*100).toFixed(2)}%`)
+      stakeMultiplier = 1
+      trailingHigh = null
+    } catch (e) {
+      console.log("❌ SL SELL ERROR:", e.message)
     }
-  } else {
-    log('(SIMULACIJA) LIVE_TRADING=false, ne šaljem pravi order.');
+    return
   }
 
-  openPosition = {
-    side,
-    entryPrice: price,
-    qty,
-    highest: price,
-    lowest: price,
-    tpLow:  price * (1 + (side === 'BUY' ?  tpLowPct/100 : -tpLowPct/100)),
-    tpHigh: price * (1 + (side === 'BUY' ?  tpHighPct/100 : -tpHighPct/100)),
-    slHard: price * (1 + (side === 'BUY' ? -stopLossPct/100 :  stopLossPct/100)),
-    trailingActive: false,
-    trailingStopPrice: null
-  };
-}
+  // TRAILING
+  if (pnl >= TRAIL_START) {
+    if (!trailingHigh || price > trailingHigh) trailingHigh = price
 
-// ===== upravljanje otvorenom pozicijom =====
-async function manageOpenPosition(lastPrice) {
-  const pos = openPosition;
-  if (!pos) return;
+    const trailStop = trailingHigh * (1 - TRAIL_DISTANCE)
 
-  if (pos.side === 'BUY') {
-    if (lastPrice > pos.highest) pos.highest = lastPrice;
-    if (lastPrice < pos.lowest)  pos.lowest  = lastPrice;
-  } else {
-    if (lastPrice < pos.lowest)  pos.lowest  = lastPrice;
-    if (lastPrice > pos.highest) pos.highest = lastPrice;
-  }
+    if (price <= trailStop) {
+      try {
+        await client.order({
+          symbol: PAIR,
+          side: "SELL",
+          type: "MARKET",
+          quantity: pos.qty.toFixed(5)
+        })
 
-  const movePct = (lastPrice - pos.entryPrice) / pos.entryPrice * (pos.side === 'BUY' ? 100 : -100);
+        console.log(`💰 PROFIT SELL: ${(pnl*100).toFixed(2)}%`)
 
-  // aktiviraj trailing kada smo dovoljno u plusu
-  if (!pos.trailingActive && trailingStop && movePct >= slStartPct) {
-    pos.trailingActive = true;
-    pos.trailingStopPrice = pos.side === 'BUY'
-      ? lastPrice * (1 - trailStepPct/100)
-      : lastPrice * (1 + trailStepPct/100);
-    log('Trailing stop AKTIVIRAN @', pos.trailingStopPrice.toFixed(2));
-  }
+        // auto increase uloga
+        stakeMultiplier = Math.min(
+          stakeMultiplier * (1 + AUTO_INCREASE),
+          MAX_MULTIPLIER
+        )
 
-  // ažuriraj trailing stop
-  if (pos.trailingActive && pos.trailingStopPrice) {
-    if (pos.side === 'BUY') {
-      const candidate = lastPrice * (1 - trailStepPct/100);
-      if (candidate > pos.trailingStopPrice) {
-        pos.trailingStopPrice = candidate;
-        log('Trailing stop BUY pomjeren @', pos.trailingStopPrice.toFixed(2));
+        console.log(`📈 Multiplier -> ${stakeMultiplier.toFixed(2)}x`)
+        trailingHigh = null
+      } catch (e) {
+        console.log("❌ TP SELL ERROR:", e.message)
       }
-    } else {
-      const candidate = lastPrice * (1 + trailStepPct/100);
-      if (candidate < pos.trailingStopPrice) {
-        pos.trailingStopPrice = candidate;
-        log('Trailing stop SELL pomjeren @', pos.trailingStopPrice.toFixed(2));
-      }
+
+      return
     }
-  }
 
-  // hard SL
-  if ((pos.side === 'BUY'  && lastPrice <= pos.slHard) ||
-      (pos.side === 'SELL' && lastPrice >= pos.slHard)) {
-    log('HARD SL pogođen.');
-    await closePosition(lastPrice, 'SL_HARD');
-    return;
-  }
-
-  // trailing SL
-  if (pos.trailingActive && pos.trailingStopPrice) {
-    if ((pos.side === 'BUY'  && lastPrice <= pos.trailingStopPrice) ||
-        (pos.side === 'SELL' && lastPrice >= pos.trailingStopPrice)) {
-      log('TRAILING STOP pogođen.');
-      await closePosition(lastPrice, 'TRAILING');
-      return;
-    }
-  }
-
-  // TP zona
-  const hitLow = pos.side === 'BUY'
-    ? lastPrice >= pos.tpLow
-    : lastPrice <= pos.tpLow;
-
-  const hitHigh = pos.side === 'BUY'
-    ? lastPrice >= pos.tpHigh
-    : lastPrice <= pos.tpHigh;
-
-  if (hitHigh) {
-    await closePosition(lastPrice, 'TP_HIGH');
-  } else if (hitLow && !pos.trailingActive) {
-    await closePosition(lastPrice, 'TP_LOW');
+    console.log(
+      `… Trailing: high=${trailingHigh.toFixed(2)}, trailStop=${trailStop.toFixed(2)}, pnl=${(pnl*100).toFixed(2)}%`
+    )
   } else {
-    log(`Pozicija (${pos.side}) @${pos.entryPrice}, sada ${lastPrice}, move=${movePct.toFixed(2)}%`);
+    console.log(
+      `Pozicija otvorena: avg=${pos.avgPrice.toFixed(2)}, price=${price.toFixed(2)}, pnl=${(pnl*100).toFixed(2)}%`
+    )
   }
 }
 
-// ===== zatvaranje pozicije =====
-async function closePosition(price, reason) {
-  const pos = openPosition;
-  if (!pos) return;
+// ================== MAIN LOOP ==================
 
-  log(`ZATVARANJE pozicije (${reason}) po cijeni ${price}`);
+async function loop() {
+  console.log("🚀 START: BTCUSDC AGGRESSIVE SAFE v3")
 
-  if (liveTrading) {
+  while (true) {
     try {
-      const side = pos.side === 'BUY' ? 'SELL' : 'BUY';
-      await client.order({
-        symbol: SYMBOL,
-        side,
-        type: 'MARKET',
-        quantity: pos.qty.toFixed(6)
-      });
-    } catch (err) {
-      console.error('Greška pri zatvaranju ORDER-a:', err.message || err);
+      const price = await getPrice()
+      updateCrashGuard(price)
+
+      const pos = await getPosition()
+
+      if (!pos) {
+        await handleNoPosition(price)
+      } else {
+        await handleOpenPosition(pos, price)
+      }
+    } catch (e) {
+      console.log("❌ CYCLE ERROR:", e.message)
     }
-  } else {
-    log('(SIMULACIJA) LIVE_TRADING=false, ne šaljem pravi close order.');
+
+    await sleep(INTERVAL_MS)
   }
-
-  const pnlPct = (price - pos.entryPrice) / pos.entryPrice * (pos.side === 'BUY' ? 100 : -100);
-  dailyPnlPct += pnlPct;
-  log(`Trade PnL: ${pnlPct.toFixed(2)}% | Daily PnL: ${dailyPnlPct.toFixed(2)}%`);
-
-  openPosition = null;
 }
 
-// keepalive log
-function keepAlive() {
-  log('KEEPALIVE ping — bot je živ.');
-}
-
-// ===== glavni loop =====
-async function mainLoop() {
-  await analyzeAndTrade();
-}
-
-// start
-(async () => {
-  log('Bot startan za simbol', SYMBOL, '| liveTrading =', liveTrading);
-  await loadSymbolFilters();
-  await mainLoop();
-  setInterval(mainLoop, SIGNAL_CFG.intervalMs);
-  setInterval(keepAlive, 5 * 60 * 1000);
-})();
+loop()
