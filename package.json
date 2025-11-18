@@ -1,12 +1,14 @@
 {
-  "name": "ripl-bot",
+  "name": "ai_scalper_v7",
   "version": "1.0.0",
-  "type": "module",
+  "description": "AI Ultra Intelligent Crypto Scalper Bot V7",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "binance-api-node": "^0.12.7"
+    "axios": "^1.6.7",
+    "dotenv": "^16.4.5"
   }
 }
