@@ -1,13 +1,12 @@
 {
   "name": "btc-aggressive-safe-v3",
   "version": "1.0.0",
-  "description": "BTCUSDC Aggressive Safe Scalper v3 (1s loop, trailing, anti-crash, auto-increase)",
-  "main": "index.js",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "binance-api-node": "^0.12.0"
+    "binance-api-node": "^0.12.5"
   }
 }
