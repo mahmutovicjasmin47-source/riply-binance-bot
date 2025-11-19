@@ -218,3 +218,16 @@ app.listen(3000, () => console.log("Keep-alive server started."));
 
 console.log("🚀 AI SCALPER V10 STARTING...");
 loop();
+import express from "express";
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send("AI Scalper V10 is running...");
+});
+
+// Railway zahtijeva PORT varijablu
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("🚀 Server alive on port", PORT);
+});
