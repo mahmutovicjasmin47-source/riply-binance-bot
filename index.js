@@ -1,6 +1,9 @@
+// AI SCALPER V7 – SPOT LONG BOT + MALi SERVER ZA RAILWAY
+
 import axios from "axios";
 import dotenv from "dotenv";
 import crypto from "crypto";
+import express from "express";
 
 dotenv.config();
 
@@ -321,6 +324,21 @@ async function tick() {
 }
 
 console.log("🚀 START — AI SCALPER V7 (SPOT LONG, ESM)");
+
+// pokretanje trading petlje
 setInterval(() => {
   tick().catch(e => console.error("Fatal tick error:", e));
 }, CONFIG.loopMs);
+
+// --------------------------------------------------------
+// MALI EXPRESS SERVER (DA RAILWAY NE GASI BOTA)
+// --------------------------------------------------------
+const app = express();
+app.get("/", (req, res) => {
+  res.send("Riply Binance bot running ✅");
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🌐 Healthcheck server listening on port ${PORT}`);
+});
