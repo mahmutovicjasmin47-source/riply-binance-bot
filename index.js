@@ -1,20 +1,20 @@
 // MULTI-ASSET AI SPOT BOT (BTC, ETH, BNB, SOL)
 // Auto-trading bot sa AI score, volatility filter, trailing TP, SL, anti-crash
-// Ulaže 70% kapitala u NAJBOLJI par u tom trenutku
+// Ulaže 70% kapitala u NAJBOLJI par u datom trenutku
 
 import axios from "axios";
 import dotenv from "dotenv";
 import crypto from "crypto";
 dotenv.config();
 
-// ------------------------------------------------------
-// KONFIG
-// ------------------------------------------------------
+// ---------------------------------------------
+// KONFIGURACIJA
+// ---------------------------------------------
 const ASSETS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
 
 const CONFIG = {
-  stakePct: 0.70,
-  tpStart: 0.003,       // 0.3% aktivira trailing
+  stakePct: 0.70,       // 70% kapitala
+  tpStart: 0.003,       // 0.3% aktivira trailing TP
   tpTrail: 0.002,       // trailing 0.2%
   stopLoss: -0.015,     // -1.5% SL
   aiTrendWindow: 24,
@@ -26,11 +26,11 @@ const CONFIG = {
   minOrder: 5
 };
 
-// ------------------------------------------------------
+// ---------------------------------------------
 // BINANCE API
-// ------------------------------------------------------
-const API_KEY = process.env.BINANCE_KEY;
-const API_SECRET = process.env.BINANCE_SECRET;
+// ---------------------------------------------
+const API_KEY = process.env.BINANCE_API_KEY;
+const API_SECRET = process.env.BINANCE_API_SECRET;
 const BASE_URL = "https://api.binance.com";
 
 function sign(data) {
@@ -76,9 +76,9 @@ async function sendOrder(symbol, side, qty) {
   );
 }
 
-// ------------------------------------------------------
+// ---------------------------------------------
 // STATE
-// ------------------------------------------------------
+// ---------------------------------------------
 let history = {
   BTCUSDC: [],
   ETHUSDC: [],
@@ -89,9 +89,9 @@ let history = {
 let antiCrashUntil = 0;
 let position = null;
 
-// ------------------------------------------------------
+// ---------------------------------------------
 // AI SCORE
-// ------------------------------------------------------
+// ---------------------------------------------
 function computeAIScore(symbol) {
   const arr = history[symbol];
   if (arr.length < CONFIG.aiTrendWindow) return -999;
@@ -121,9 +121,9 @@ function computeAIScore(symbol) {
   return score;
 }
 
-// ------------------------------------------------------
-// ANTICRASH
-// ------------------------------------------------------
+// ---------------------------------------------
+// ANTI-CRASH MEHANIZAM
+// ---------------------------------------------
 function updateCrashGuard(symbol, price) {
   const now = Date.now();
   history[symbol].push(price);
@@ -140,9 +140,9 @@ function updateCrashGuard(symbol, price) {
   }
 }
 
-// ------------------------------------------------------
-// TRADING LOGIKA
-// ------------------------------------------------------
+// ---------------------------------------------
+// TRADING LOGIKA – BEZ POZICIJE
+// ---------------------------------------------
 async function handleNoPosition(prices) {
   const now = Date.now();
 
@@ -159,13 +159,13 @@ async function handleNoPosition(prices) {
     return;
   }
 
-  // Izračunati AI score za sve parove
+  // AI score za sve parove
   let scores = {};
   for (let s of ASSETS) {
     scores[s] = computeAIScore(s);
   }
 
-  // NAJBOLJI PAR
+  // Najbolji par
   const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0];
 
   if (scores[best] < 0) {
@@ -188,6 +188,9 @@ async function handleNoPosition(prices) {
   };
 }
 
+// ---------------------------------------------
+// TRADING LOGIKA – SA POZICIJOM
+// ---------------------------------------------
 async function handlePosition(price) {
   const pnl = (price - position.entry) / position.entry;
 
@@ -199,7 +202,7 @@ async function handlePosition(price) {
     return;
   }
 
-  // TRAILING PROFIT
+  // TRAILING TP
   if (pnl >= CONFIG.tpStart) {
     if (price > position.trailingHigh) {
       position.trailingHigh = price;
@@ -220,9 +223,9 @@ async function handlePosition(price) {
   }
 }
 
-// ------------------------------------------------------
+// ---------------------------------------------
 // MAIN LOOP
-// ------------------------------------------------------
+// ---------------------------------------------
 async function loop() {
   let prices = {};
 
