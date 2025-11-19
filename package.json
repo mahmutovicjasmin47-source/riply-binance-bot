@@ -1,13 +1,16 @@
 {
-  "name": "ai-scalper-v7",
+  "name": "riply-binance-bot",
   "version": "1.0.0",
-  "description": "AI Ultra Intelligent Crypto Scalper Bot V7 - Railway Deployment",
+  "description": "Railway stable Binance trading bot",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "axios": "^1.6.7",
-    "dotenv": "^16.4.5"
+    "crypto": "^1.0.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
   }
 }
