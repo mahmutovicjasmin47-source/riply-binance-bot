@@ -1,13 +1,12 @@
 {
   "name": "riply-binance-bot",
   "version": "1.0.0",
-  "description": "Riply AI Aggressive + Secure Binance Spot Bot",
-  "main": "index.js",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "binance-api-node": "^0.12.7"
+    "binance-api-node": "^0.12.4"
   }
 }
