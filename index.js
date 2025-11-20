@@ -1,8 +1,9 @@
 // ===============================
-//  RIPLY AGGRESSIVE DUAL-ARMOR BOT (FIXED)
+//  RIPLY AGGRESSIVE DUAL-ARMOR BOT
 // ===============================
 
-import { default as Binance } from 'binance-api-node';
+import pkg from 'binance-api-node';
+const Binance = pkg.default;   // << OVO RJEŠAVA TVOJU GREŠKU
 
 // ----- ENV -----
 const client = Binance({
@@ -13,26 +14,23 @@ const client = Binance({
 // ----- SETTINGS -----
 const PAIRS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
 
-// Agresivno + sigurnosni oklop
-const SCAN_INTERVAL = 1500;        // 1.5 sekunde
-const SIGNAL_THRESHOLD = 0.58;     // spušten threshold → brži ulaz
-const MAX_POSITIONS = 3;           // ograniči rizične situacije
-const TRAIL_STEP = 0.25;           // trailing step %
-const HARD_STOP_LOSS = -0.35;      // max gubitak po poziciji
-const GLOBAL_STOP = -1.2;          // globalni stop
-const MIN_PROFIT_CLOSE = 0.22;     // agresivno zatvaranje profita
+const SCAN_INTERVAL = 1500;
+const SIGNAL_THRESHOLD = 0.58;
+const MAX_POSITIONS = 3;
+const TRAIL_STEP = 0.25;
+const HARD_STOP_LOSS = -0.35;
+const GLOBAL_STOP = -1.2;
+const MIN_PROFIT_CLOSE = 0.22;
 
-// ----- STATE -----
 let positions = {};
 let globalPNL = 0;
 
-// ----- AI RANDOM SIMULATION -----
+// AI signal mock
 function aiSignal() {
   return Math.random();
 }
 
-// ----- TRAILING PROFIT -----
-function applyTrailing(entry, price) {
+function applyTrailing(pair, entry, price) {
   const change = ((price - entry) / entry) * 100;
 
   if (change >= TRAIL_STEP) return { exit: true, pnl: change };
@@ -41,10 +39,10 @@ function applyTrailing(entry, price) {
   return { exit: false, pnl: change };
 }
 
-// ----- MAIN LOOP -----
 async function runBot() {
   try {
     for (const pair of PAIRS) {
+
       const ticker = await client.prices({ symbol: pair });
       const price = parseFloat(ticker[pair]);
 
@@ -58,7 +56,7 @@ async function runBot() {
 
       } else {
         const { entry } = positions[pair];
-        const result = applyTrailing(entry, price);
+        const result = applyTrailing(pair, entry, price);
 
         if (result.exit) {
           console.log(`💰 Zatvaram ${pair}: PNL=${result.pnl.toFixed(2)}%`);
@@ -78,5 +76,5 @@ async function runBot() {
   }
 }
 
-console.log("🔥 RIPLY AI BOT AKTIVAN — AGRESIVNI + SIGURNI MOD 🔥");
+console.log("🔥 RIPLY AI BOT AKTIVAN — AGRESIVNI + SIGURNI MOD UKLJUČEN 🔥");
 setInterval(runBot, SCAN_INTERVAL);
