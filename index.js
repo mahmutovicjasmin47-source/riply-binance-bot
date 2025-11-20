@@ -1,87 +1,145 @@
-import crypto from "crypto";
-import fetch from "node-fetch";
+import Binance from 'binance-api-node';
 
-// ENV VARS
-const API_KEY = process.env.BINANCE_API_KEY;
-const API_SECRET = process.env.BINANCE_API_SECRET;
-const LIVE_TRADING = process.env.LIVE_TRADING === "true";
+//////////////////////////////////////////////////////
+//               AGRESIVNE POSTAVKE                 //
+//////////////////////////////////////////////////////
 
-// Trading parovi
-const SYMBOLS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
+const client = Binance({
+  apiKey: process.env.BINANCE_API_KEY,
+  apiSecret: process.env.BINANCE_API_SECRET,
+});
 
-// Pomocne funkcije
-function sign(query) {
-  return crypto.createHmac("sha256", API_SECRET).update(query).digest("hex");
+const PAIRS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
+
+const SETTINGS = {
+  SCAN_INTERVAL: 1200,      // 1.2 sekunde
+  AI_THRESHOLD: 0.38,       // spušten prag za ulaz
+  MAX_POSITIONS: 6,         // više pozicija odjednom
+  INVEST_PER_TRADE: 12,     // 12 USDC po positionu
+  TRAILING_TP: 0.23,        // brži take-profit
+  CLOSE_PROFIT: 0.32,       // agresivno zatvaranje profita
+  COOLDOWN: 1800,           // 1.8 sekundi
+  NV_MODE: true,            // No Validation AI mode
+  HARD_STOP_LOSS: -0.9      // zaštita kapitala
+};
+
+let activePositions = {};
+
+//////////////////////////////////////////////////////
+//                  AI SIGNAL                      //
+//////////////////////////////////////////////////////
+
+function aiNV() {
+  return Math.random(); // NV mode → čisti AI RNG
 }
 
-async function api(path, params = "") {
-  const timestamp = Date.now();
-  const query = params + `&timestamp=${timestamp}`;
-  const signature = sign(query);
+//////////////////////////////////////////////////////
+//              BINANCE FUNKCIJE                   //
+//////////////////////////////////////////////////////
 
-  const url = `https://api.binance.com${path}?${query}&signature=${signature}`;
-
-  const res = await fetch(url, {
-    headers: { "X-MBX-APIKEY": API_KEY },
-  });
-
-  return res.json();
+async function price(symbol) {
+  const t = await client.prices({ symbol });
+  return parseFloat(t[symbol]);
 }
 
-async function getPrice(symbol) {
+async function buy(symbol) {
   try {
-    const res = await fetch(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
-    );
-    const data = await res.json();
-    return parseFloat(data.price);
-  } catch (e) {
-    return null;
+    const p = await price(symbol);
+    const qty = SETTINGS.INVEST_PER_TRADE / p;
+
+    const order = await client.order({
+      symbol,
+      side: "BUY",
+      type: "MARKET",
+      quantity: qty.toFixed(6)
+    });
+
+    activePositions[symbol] = {
+      entry: p,
+      amount: qty,
+      time: Date.now()
+    };
+
+    console.log(`🔥 KUPLJENO ${symbol} @ ${p}`);
+  } catch (error) {
+    console.log("BUY GREŠKA:", error);
   }
 }
 
-// Minimalistički AI indikator (demo)
-function aiSignal(price) {
-  const rnd = Math.random();
-  if (rnd > 0.97) return "BUY";
-  if (rnd < 0.03) return "SELL";
-  return "NONE";
+async function sell(symbol) {
+  try {
+    const pos = activePositions[symbol];
+    if (!pos) return;
+
+    const order = await client.order({
+      symbol,
+      side: "SELL",
+      type: "MARKET",
+      quantity: pos.amount.toFixed(6)
+    });
+
+    console.log(`💰 PRODANO ${symbol}`);
+    delete activePositions[symbol];
+
+  } catch (error) {
+    console.log("SELL GREŠKA:", error);
+  }
 }
 
-// MAIN LOOP
-console.log("🚀 MULTI-ASSET AI BOT STARTAN");
-
-let logCooldown = 0;
+//////////////////////////////////////////////////////
+//                GLAVNI SCAN LOOP                 //
+//////////////////////////////////////////////////////
 
 async function loop() {
-  try {
-    for (let symbol of SYMBOLS) {
-      const price = await getPrice(symbol);
-      if (!price) continue;
+  for (const pair of PAIRS) {
+    try {
+      const ai = aiNV();
+      const p = await price(pair);
 
-      const signal = aiSignal(price);
+      // Ako pozicija postoji → prati je
+      if (activePositions[pair]) {
+        const pos = activePositions[pair];
+        const pnl = ((p - pos.entry) / pos.entry) * 100;
 
-      // Proces signala
-      if (signal === "BUY" && LIVE_TRADING) {
-        console.log(`🟢 AI BUY signal ➜ ${symbol} @ ${price}`);
+        console.log(`Pozicija ${pair}: PNL=${pnl.toFixed(2)}%`);
+
+        // Hard stop loss zaštita
+        if (pnl <= SETTINGS.HARD_STOP_LOSS) {
+          console.log("🛑 STOP LOSS — izlaz!");
+          await sell(pair);
+          continue;
+        }
+
+        // Agresivni profit close
+        if (pnl >= SETTINGS.CLOSE_PROFIT) {
+          await sell(pair);
+          continue;
+        }
+
+        continue;
       }
 
-      if (signal === "SELL" && LIVE_TRADING) {
-        console.log(`🔴 AI SELL signal ➜ ${symbol} @ ${price}`);
+      // Ako nema pozicije → može otvoriti
+      if (
+        ai >= SETTINGS.AI_THRESHOLD &&
+        Object.keys(activePositions).length < SETTINGS.MAX_POSITIONS
+      ) {
+        await buy(pair);
       }
-    }
 
-    // LOG RATE LIMIT PREVENTION – samo 1 put na 10 sekundi
-    if (logCooldown <= 0) {
-      console.log("⏳ AI analiza u toku…");
-      logCooldown = 5; // 5 ciklusa × 2 sekunde = 10 sec
-    } else {
-      logCooldown--;
-    }
+      await new Promise(r => setTimeout(r, SETTINGS.COOLDOWN));
 
-  } catch (err) {
-    console.log("Error:", err.message);
+    } catch (err) {
+      console.log("SCAN GREŠKA:", err);
+    }
   }
+
+  setTimeout(loop, SETTINGS.SCAN_INTERVAL);
 }
 
-setInterval(loop, 2000);
+//////////////////////////////////////////////////////
+//                     START                       //
+//////////////////////////////////////////////////////
+
+console.log("🚀 AGRESIVNI MULTI-ASSET AI BOT STARTAN");
+loop();
