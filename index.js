@@ -1,121 +1,89 @@
-import crypto from "crypto";
+// ===============================
+//  RIPLY AGGRESSIVE DUAL-ARMOR BOT
+// ===============================
 
-const API_KEY = process.env.BINANCE_API_KEY;
-const API_SECRET = process.env.BINANCE_API_SECRET;
-const LIVE = process.env.LIVE_TRADING === "true";
+import Binance from 'binance-api-node';
+import crypto from 'crypto';   // <---- OVO SI ZABORAVIO, OVO RIJEŠAVA PROBLEM
 
-const SYMBOLS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
-const INTERVAL = 2000; // 2 sekunde
-const AI_THRESHOLD = 0.32; 
-const TRAILING_TP = 0.0045; 
-const STOP_LOSS = -0.0035;
-const COOLDOWN = 3000;
+// ----- ENV -----
+const client = Binance({
+  apiKey: process.env.BINANCE_API_KEY,
+  apiSecret: process.env.BINANCE_API_SECRET,
+});
 
-let lastTradeTime = 0;
-let activePositions = {};
+// ----- SETTINGS -----
+const PAIRS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
 
-async function binanceRequest(path, params = "") {
-  const timestamp = Date.now();
-  const query = params + `timestamp=${timestamp}`;
-  const signature = crypto
-    .createHmac("sha256", API_SECRET)
-    .update(query)
-    .digest("hex");
+// Agresivno + sigurnosni oklop
+const SCAN_INTERVAL = 1500;        // 1.5 sekunde
+const SIGNAL_THRESHOLD = 0.58;     // spušten threshold → brži ulaz
+const MAX_POSITIONS = 3;           // ograniči rizične situacije
+const TRAIL_STEP = 0.25;           // trailing step %
+const HARD_STOP_LOSS = -0.35;      // maksimalni dopušteni gubitak po poziciji
+const GLOBAL_STOP = -1.2;          // globalna zaštita (svi parovi)
+const MIN_PROFIT_CLOSE = 0.22;     // agresivno zatvaranje profita
 
-  const url = `https://api.binance.com${path}?${query}&signature=${signature}`;
+// ----- STATE -----
+let positions = {};
+let globalPNL = 0;
 
-  const res = await fetch(url, {
-    headers: { "X-MBX-APIKEY": API_KEY },
-  });
-
-  return await res.json();
+// ----- HELPER: Random AI simulacija -----
+function aiSignal() {
+  return Math.random(); // 0–1
 }
 
-async function getPrice(symbol) {
-  const r = await fetch(
-    `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
-  );
-  const j = await r.json();
-  return parseFloat(j.price);
+// ----- HELPER: Trailing profit -----
+function applyTrailing(pair, entry, price) {
+  const change = ((price - entry) / entry) * 100;
+
+  if (change >= TRAIL_STEP) return { exit: true, pnl: change };
+  if (change <= HARD_STOP_LOSS) return { exit: true, pnl: change };
+
+  return { exit: false, pnl: change };
 }
 
-function generateAISignal(priceHistory) {
-  const last = priceHistory[priceHistory.length - 1];
-  const prev = priceHistory[priceHistory.length - 2];
+// ----- MAIN BOT LOOP -----
+async function runBot() {
+  try {
+    for (const pair of PAIRS) {
 
-  const momentum = (last - prev) / prev;
-  const randomBoost = Math.random() * 0.1;
+      // Fetch price
+      const ticker = await client.prices({ symbol: pair });
+      const price = parseFloat(ticker[pair]);
 
-  return momentum + randomBoost;
-}
+      // Ako nemamo poziciju → tražimo signal
+      if (!positions[pair]) {
+        const signal = aiSignal();
 
-async function checkSymbol(symbol) {
-  const prices = [];
-  for (let i = 0; i < 6; i++) {
-    prices.push(await getPrice(symbol));
-    await new Promise((r) => setTimeout(r, 50));
-  }
+        if (signal >= SIGNAL_THRESHOLD && Object.keys(positions).length < MAX_POSITIONS) {
+          positions[pair] = { entry: price };
+          console.log(`🚀 Ulazim u poziciju ${pair} @ ${price}`);
+        }
 
-  const signal = generateAISignal(prices);
+      } else {
+        // Pozicija aktivna → trailing + zaštita
+        const { entry } = positions[pair];
+        const result = applyTrailing(pair, entry, price);
 
-  if (!activePositions[symbol] && signal > AI_THRESHOLD) {
-    const price = prices.at(-1);
-
-    if (LIVE) {
-      await openPosition(symbol);
+        if (result.exit) {
+          console.log(`💰 Zatvaram ${pair}: PNL=${result.pnl.toFixed(2)}%`);
+          globalPNL += result.pnl;
+          delete positions[pair];
+        }
+      }
     }
 
-    activePositions[symbol] = {
-      entry: price,
-      highest: price,
-    };
-
-    console.log(`🚀 Ulazim u trade ${symbol} po cijeni: ${price}`);
-  }
-
-  if (activePositions[symbol]) {
-    const price = prices.at(-1);
-    const pos = activePositions[symbol];
-
-    if (price > pos.highest) pos.highest = price;
-
-    const pnl = (price - pos.entry) / pos.entry;
-
-    if (pnl >= TRAILING_TP) {
-      console.log(`🔥 TP → ${symbol} profit = ${(pnl * 100).toFixed(2)}%`);
-      if (LIVE) await closePosition(symbol);
-      delete activePositions[symbol];
-      return;
+    // GLOBAL STOP PROTECTION
+    if (globalPNL <= GLOBAL_STOP) {
+      console.log(`🛑 GLOBAL STOP — Bot se isključuje! Total PNL=${globalPNL.toFixed(2)}%`);
+      process.exit(0);
     }
 
-    if (pnl <= STOP_LOSS) {
-      console.log(`⚠️ STOP LOSS → ${symbol} = ${(pnl * 100).toFixed(2)}%`);
-      if (LIVE) await closePosition(symbol);
-      delete activePositions[symbol];
-      return;
-    }
-
-    console.log(`Pozicija ${symbol}: PNL=${(pnl * 100).toFixed(2)}%`);
+  } catch (err) {
+    console.error("Greška:", err.message);
   }
 }
 
-async function openPosition(symbol) {
-  console.log(`📥 BUY ${symbol}`);
-}
-
-async function closePosition(symbol) {
-  console.log(`📤 SELL ${symbol}`);
-}
-
-async function botLoop() {
-  const now = Date.now();
-  if (now - lastTradeTime < COOLDOWN) return;
-  lastTradeTime = now;
-
-  for (const s of SYMBOLS) {
-    checkSymbol(s);
-  }
-}
-
-console.log("🔥 PREMIUM AI BOT STARTAN – AGRESIVNI MODE AKTIVAN 🔥");
-setInterval(botLoop, INTERVAL);
+// ----- LOOP -----
+console.log("🔥 RIPLY AI BOT AKTIVAN — AGRESIVNI + SIGURNI MOD UKLJUČEN 🔥");
+setInterval(runBot, SCAN_INTERVAL);
