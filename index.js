@@ -1,251 +1,209 @@
-// MULTI-ASSET AI SPOT BOT (BTC, ETH, BNB, SOL)
-// Auto-trading bot sa AI score, volatility filter, trailing TP, SL, anti-crash
-// Ulaže 70% kapitala u NAJBOLJI par u datom trenutku
-
 import axios from "axios";
-import dotenv from "dotenv";
 import crypto from "crypto";
-dotenv.config();
 
-// ---------------------------------------------
-// KONFIGURACIJA
-// ---------------------------------------------
-const ASSETS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
-
+// ------------------------------
+// KONFIG
+// ------------------------------
 const CONFIG = {
-  stakePct: 0.70,       // 70% kapitala
-  tpStart: 0.003,       // 0.3% aktivira trailing TP
-  tpTrail: 0.002,       // trailing 0.2%
-  stopLoss: -0.015,     // -1.5% SL
-  aiTrendWindow: 24,
-  minVolatility: 0.0010,
-  antiCrashPct: -0.022,
-  antiCrashWindowMs: 60000,
-  crashPauseMs: 180000,
-  loopMs: 1500,
-  minOrder: 5
+    stakePct: 0.70,              // koristi 70% kapitala
+    minVolatility: 0.0010,       // min volatilnost
+    tpStart: 0.003,              // 0.3% aktivira trailing TP
+    tpTrail: 0.002,              // trailing 0.2%
+    stopLoss: -0.015,            // -1.5% SL
+    aiTrendWindow: 20,           // AI trend score (20 svijeća)
+    antiCrashPct: -0.022,        // -2.2% crash zaštita
+    antiCrashWindowMs: 60000,    // 1 min crash analiza
+    crashPauseMs: 150000,        // 2.5 min pauza nakon crashera
+    loopMs: 2000                 // 2 sekunde delay
 };
 
-// ---------------------------------------------
+// ------------------------------
 // BINANCE API
-// ---------------------------------------------
+// ------------------------------
 const API_KEY = process.env.BINANCE_API_KEY;
 const API_SECRET = process.env.BINANCE_API_SECRET;
-const BASE_URL = "https://api.binance.com";
 
-function sign(data) {
-  return crypto.createHmac("sha256", API_SECRET).update(data).digest("hex");
+// TRADE MOD
+const LIVE = (process.env.LIVE_TRADING || "false").toLowerCase() === "true";
+
+// ASSETS LISTA IZ VARIJABLE
+const ASSETS = process.env.ASSETS.split(",");
+
+// ------------------------------
+// HMAC Potpis
+// ------------------------------
+function sign(query) {
+    return crypto.createHmac("sha256", API_SECRET).update(query).digest("hex");
 }
 
-async function api(method, path, params = {}, signed = false) {
-  const ts = Date.now();
-  const q = new URLSearchParams(params);
+// ------------------------------
+// Binance GET poziv
+// ------------------------------
+async function api(path, params = "") {
+    const timestamp = Date.now();
+    const query = params ? `${params}&timestamp=${timestamp}` : `timestamp=${timestamp}`;
+    const signature = sign(query);
 
-  if (signed) {
-    q.append("timestamp", ts);
-    q.append("signature", sign(q.toString()));
-  }
+    const url = `https://api.binance.com${path}?${query}&signature=${signature}`;
 
-  const url = `${BASE_URL}${path}?${q.toString()}`;
-  return (
-    await axios({
-      method,
-      url,
-      headers: signed ? { "X-MBX-APIKEY": API_KEY } : {},
-    })
-  ).data;
+    return axios.get(url, {
+        headers: { "X-MBX-APIKEY": API_KEY }
+    }).then(r => r.data);
 }
 
+// ------------------------------
+// Binance POST poziv
+// ------------------------------
+async function post(path, params) {
+    const timestamp = Date.now();
+    const query = `${params}&timestamp=${timestamp}`;
+    const signature = sign(query);
+
+    const url = `https://api.binance.com${path}?${query}&signature=${signature}`;
+
+    return axios.post(url, {}, {
+        headers: { "X-MBX-APIKEY": API_KEY }
+    }).then(r => r.data);
+}
+
+// ------------------------------
+// Cijena
+// ------------------------------
 async function getPrice(symbol) {
-  const r = await api("GET", "/api/v3/ticker/price", { symbol });
-  return parseFloat(r.price);
+    const r = await axios.get("https://api.binance.com/api/v3/ticker/price?symbol=" + symbol);
+    return parseFloat(r.data.price);
 }
 
-async function getBalance(asset) {
-  const acc = await api("GET", "/api/v3/account", {}, true);
-  const b = acc.balances.find((x) => x.asset === asset);
-  return b ? parseFloat(b.free) : 0;
-}
+// ------------------------------
+// AI TREND ANALIZA
+// ------------------------------
+async function aiTrend(symbol) {
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=${CONFIG.aiTrendWindow}`;
+    const r = await axios.get(url);
+    const candles = r.data.map(c => ({
+        open: parseFloat(c[1]),
+        close: parseFloat(c[4]),
+        high: parseFloat(c[2]),
+        low: parseFloat(c[3])
+    }));
 
-async function sendOrder(symbol, side, qty) {
-  return api(
-    "POST",
-    "/api/v3/order",
-    { symbol, side, type: "MARKET", quantity: qty.toFixed(6) },
-    true
-  );
-}
-
-// ---------------------------------------------
-// STATE
-// ---------------------------------------------
-let history = {
-  BTCUSDC: [],
-  ETHUSDC: [],
-  BNBUSDC: [],
-  SOLUSDC: []
-};
-
-let antiCrashUntil = 0;
-let position = null;
-
-// ---------------------------------------------
-// AI SCORE
-// ---------------------------------------------
-function computeAIScore(symbol) {
-  const arr = history[symbol];
-  if (arr.length < CONFIG.aiTrendWindow) return -999;
-
-  const first = arr[0];
-  const last = arr[arr.length - 1];
-  const trend = (last - first) / first;
-
-  let score = 0;
-
-  if (trend > 0.002) score += 30;
-  if (trend > 0.004) score += 20;
-  if (trend < -0.002) score -= 30;
-
-  const half = arr[Math.floor(arr.length / 2)];
-  const momentum = (last - half) / half;
-
-  if (momentum > 0.0015) score += 20;
-  if (momentum < -0.001) score -= 20;
-
-  const high = Math.max(...arr);
-  const low = Math.min(...arr);
-  const volatility = (high - low) / last;
-
-  if (volatility < CONFIG.minVolatility) score -= 40;
-
-  return score;
-}
-
-// ---------------------------------------------
-// ANTI-CRASH MEHANIZAM
-// ---------------------------------------------
-function updateCrashGuard(symbol, price) {
-  const now = Date.now();
-  history[symbol].push(price);
-  history[symbol] = history[symbol].slice(-60);
-
-  if (history[symbol].length < 2) return;
-
-  const first = history[symbol][0];
-  const change = (price - first) / first;
-
-  if (change <= CONFIG.antiCrashPct) {
-    antiCrashUntil = now + CONFIG.crashPauseMs;
-    console.log(`⚠️ ANTICRASH: ${symbol} pao ${(change * 100).toFixed(2)}%, pauza aktivna`);
-  }
-}
-
-// ---------------------------------------------
-// TRADING LOGIKA – BEZ POZICIJE
-// ---------------------------------------------
-async function handleNoPosition(prices) {
-  const now = Date.now();
-
-  if (now < antiCrashUntil) {
-    console.log("⏸ Pauza zbog anti-crash zaštite");
-    return;
-  }
-
-  const usdc = await getBalance("USDC");
-  const stake = usdc * CONFIG.stakePct;
-
-  if (stake < CONFIG.minOrder) {
-    console.log("Premalo USDC za poziciju.");
-    return;
-  }
-
-  // AI score za sve parove
-  let scores = {};
-  for (let s of ASSETS) {
-    scores[s] = computeAIScore(s);
-  }
-
-  // Najbolji par
-  const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0];
-
-  if (scores[best] < 0) {
-    console.log("Nema pozitivnog AI signala, čekam.");
-    return;
-  }
-
-  const entry = prices[best];
-  const qty = stake / entry;
-
-  console.log(`🚀 KUPUJEM ${best} @ ${entry} qty=${qty}`);
-
-  await sendOrder(best, "BUY", qty);
-
-  position = {
-    symbol: best,
-    entry,
-    qty,
-    trailingHigh: entry,
-  };
-}
-
-// ---------------------------------------------
-// TRADING LOGIKA – SA POZICIJOM
-// ---------------------------------------------
-async function handlePosition(price) {
-  const pnl = (price - position.entry) / position.entry;
-
-  // STOP LOSS
-  if (pnl <= CONFIG.stopLoss) {
-    console.log(`🛑 STOP LOSS @ ${price}`);
-    await sendOrder(position.symbol, "SELL", position.qty);
-    position = null;
-    return;
-  }
-
-  // TRAILING TP
-  if (pnl >= CONFIG.tpStart) {
-    if (price > position.trailingHigh) {
-      position.trailingHigh = price;
+    let score = 0;
+    for (let i = 1; i < candles.length; i++) {
+        if (candles[i].close > candles[i].open) score++;
+        else score--;
     }
 
-    const trailStop = position.trailingHigh * (1 - CONFIG.tpTrail);
+    const vol = Math.abs(candles[candles.length - 1].high - candles[candles.length - 1].low)
+        / candles[candles.length - 1].low;
 
-    if (price <= trailStop) {
-      console.log(`💰 TRAILING TP SELL @ ${price}`);
-      await sendOrder(position.symbol, "SELL", position.qty);
-      position = null;
-      return;
-    }
-
-    console.log(`… Trailing ${position.symbol}: HL=${position.trailingHigh} PNL=${(pnl*100).toFixed(2)}%`);
-  } else {
-    console.log(`Pozicija ${position.symbol}: PNL=${(pnl*100).toFixed(2)}%`);
-  }
+    return { score, vol };
 }
 
-// ---------------------------------------------
-// MAIN LOOP
-// ---------------------------------------------
+// ------------------------------
+// BALANCE
+// ------------------------------
+async function getUSDCBalance() {
+    const data = await api("/api/v3/account");
+    const bal = data.balances.find(b => b.asset === "USDC");
+    return parseFloat(bal.free);
+}
+
+// ------------------------------
+// MARKET BUY
+// ------------------------------
+async function buy(symbol, amount) {
+    if (!LIVE) {
+        console.log("SIM BUY:", symbol, amount);
+        return;
+    }
+    return post("/api/v3/order", `symbol=${symbol}&side=BUY&type=MARKET&quoteOrderQty=${amount}`);
+}
+
+// ------------------------------
+// MARKET SELL
+// ------------------------------
+async function sell(symbol, amount) {
+    if (!LIVE) {
+        console.log("SIM SELL:", symbol, amount);
+        return;
+    }
+    return post("/api/v3/order", `symbol=${symbol}&side=SELL&type=MARKET&quantity=${amount}`);
+}
+
+// ------------------------------
+// GLAVNA PETLJA
+// ------------------------------
+let lastCrash = 0;
+let holding = null;
+let entryPrice = 0;
+
 async function loop() {
-  let prices = {};
+    try {
+        // Anti-crash
+        if (Date.now() - lastCrash < CONFIG.crashPauseMs) {
+            console.log("⛔ Pauza zbog crash detekcije...");
+            return setTimeout(loop, CONFIG.loopMs);
+        }
 
-  for (let s of ASSETS) {
-    const price = await getPrice(s);
-    prices[s] = price;
+        // Ako držimo poziciju -> trailing TP / SL
+        if (holding) {
+            const price = await getPrice(holding);
+            const pnl = (price - entryPrice) / entryPrice;
 
-    updateCrashGuard(s, price);
-    history[s].push(price);
-    history[s] = history[s].slice(-CONFIG.aiTrendWindow);
-  }
+            if (pnl <= CONFIG.stopLoss) {
+                console.log("⛔ Stop Loss HIT -> SELL:", holding);
+                await sell(holding, (await getBalanceSize(holding)));
+                holding = null;
+                return setTimeout(loop, CONFIG.loopMs);
+            }
 
-  if (!position) {
-    await handleNoPosition(prices);
-  } else {
-    await handlePosition(prices[position.symbol]);
-  }
+            if (pnl >= CONFIG.tpStart) {
+                if (pnl <= CONFIG.tpStart - CONFIG.tpTrail) {
+                    console.log("🎯 Trailing TP -> SELL:", holding);
+                    await sell(holding, (await getBalanceSize(holding)));
+                    holding = null;
+                    return setTimeout(loop, CONFIG.loopMs);
+                }
+                console.log("📈 Trailing", holding, "PNL=", (pnl * 100).toFixed(2) + "%");
+            }
+        }
 
-  setTimeout(loop, CONFIG.loopMs);
+        // Ako ne držimo poziciju -> tražimo ulaz
+        if (!holding) {
+            let best = null;
+            let bestScore = -999;
+
+            for (let sym of ASSETS) {
+                const { score, vol } = await aiTrend(sym);
+
+                if (vol < CONFIG.minVolatility) continue;
+                if (score > bestScore) {
+                    best = sym;
+                    bestScore = score;
+                }
+            }
+
+            if (bestScore > 3) {
+                const bal = await getUSDCBalance();
+                const stake = bal * CONFIG.stakePct;
+
+                console.log("🚀 BUY:", best, "AI score:", bestScore);
+                await buy(best, stake);
+
+                holding = best;
+                entryPrice = await getPrice(best);
+            } else {
+                console.log("Nema pozitivnog AI signala, čekam.");
+            }
+        }
+    } catch (e) {
+        console.log("ERROR:", e.message);
+        lastCrash = Date.now();
+    }
+
+    setTimeout(loop, CONFIG.loopMs);
 }
 
+// START
 console.log("🚀 MULTI-ASSET AI BOT STARTAN");
 loop();
