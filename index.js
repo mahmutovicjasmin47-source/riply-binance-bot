@@ -1,80 +1,86 @@
 // ===============================
-//  RIPLY AGGRESSIVE DUAL-ARMOR BOT
+//  RIPLY SAFE-AGGRESSIVE BOT (C MODE)
 // ===============================
 
-import pkg from 'binance-api-node';
-const Binance = pkg.default;   // << OVO RJEŠAVA TVOJU GREŠKU
+// ----- IMPORT (ISPRAVAN ZA NODE 22 + RAILWAY) -----
+import { default as Binance } from 'binance-api-node';
 
-// ----- ENV -----
+// ----- INIT -----
 const client = Binance({
-  apiKey: process.env.BINANCE_API_KEY,
-  apiSecret: process.env.BINANCE_API_SECRET,
+    apiKey: process.env.BINANCE_API_KEY,
+    apiSecret: process.env.BINANCE_API_SECRET,
 });
 
 // ----- SETTINGS -----
 const PAIRS = ["BTCUSDC", "ETHUSDC", "BNBUSDC", "SOLUSDC"];
 
-const SCAN_INTERVAL = 1500;
-const SIGNAL_THRESHOLD = 0.58;
-const MAX_POSITIONS = 3;
-const TRAIL_STEP = 0.25;
-const HARD_STOP_LOSS = -0.35;
-const GLOBAL_STOP = -1.2;
-const MIN_PROFIT_CLOSE = 0.22;
+// SIGURAN + POLUAGRESIVAN MOD (C)
+const SCAN_INTERVAL = 2000;
+const SIGNAL_THRESHOLD = 0.63;
+const MAX_POSITIONS = 2;
+const TRAIL_STEP = 0.20;
+const HARD_STOP = -0.25;
+const GLOBAL_STOP = -0.90;
+const MIN_PROFIT_CLOSE = 0.18;
 
+// ----- STATE -----
 let positions = {};
 let globalPNL = 0;
 
-// AI signal mock
+// ----- AI SIGNAL (SIMULACIJA) -----
 function aiSignal() {
-  return Math.random();
+    return Math.random();
 }
 
-function applyTrailing(pair, entry, price) {
-  const change = ((price - entry) / entry) * 100;
+// ----- TRAILING LOGIKA -----
+function trailing(entry, price) {
+    const pnl = ((price - entry) / entry) * 100;
 
-  if (change >= TRAIL_STEP) return { exit: true, pnl: change };
-  if (change <= HARD_STOP_LOSS) return { exit: true, pnl: change };
+    if (pnl >= TRAIL_STEP) return { exit: true, pnl };
+    if (pnl <= HARD_STOP) return { exit: true, pnl };
 
-  return { exit: false, pnl: change };
+    return { exit: false, pnl };
 }
 
+// ----- MAIN LOOP -----
 async function runBot() {
-  try {
-    for (const pair of PAIRS) {
+    try {
+        for (const pair of PAIRS) {
+            const ticker = await client.prices({ symbol: pair });
+            const price = parseFloat(ticker[pair]);
 
-      const ticker = await client.prices({ symbol: pair });
-      const price = parseFloat(ticker[pair]);
+            // NEMA POZICIJE → TRAŽI SIGNAL
+            if (!positions[pair]) {
+                const signal = aiSignal();
 
-      if (!positions[pair]) {
-        const signal = aiSignal();
+                if (signal >= SIGNAL_THRESHOLD && Object.keys(positions).length < MAX_POSITIONS) {
+                    positions[pair] = { entry: price };
+                    console.log(`🚀 Ulazim u ${pair} @ ${price}`);
+                }
 
-        if (signal >= SIGNAL_THRESHOLD && Object.keys(positions).length < MAX_POSITIONS) {
-          positions[pair] = { entry: price };
-          console.log(`🚀 Ulazim u poziciju ${pair} @ ${price}`);
+            } else {
+                // AKTIVNA POZICIJA
+                const { entry } = positions[pair];
+                const check = trailing(entry, price);
+
+                if (check.exit) {
+                    globalPNL += check.pnl;
+                    console.log(`💰 Zatvaram ${pair}: PNL=${check.pnl.toFixed(2)}%`);
+                    delete positions[pair];
+                }
+            }
         }
 
-      } else {
-        const { entry } = positions[pair];
-        const result = applyTrailing(pair, entry, price);
-
-        if (result.exit) {
-          console.log(`💰 Zatvaram ${pair}: PNL=${result.pnl.toFixed(2)}%`);
-          globalPNL += result.pnl;
-          delete positions[pair];
+        // GLOBAL STOP PROTECTION
+        if (globalPNL <= GLOBAL_STOP) {
+            console.log(`🛑 GLOBAL STOP — BOT SE GASI (Total PNL=${globalPNL.toFixed(2)}%)`);
+            process.exit(0);
         }
-      }
-    }
 
-    if (globalPNL <= GLOBAL_STOP) {
-      console.log(`🛑 GLOBAL STOP — Bot se isključuje! Total PNL=${globalPNL.toFixed(2)}%`);
-      process.exit(0);
+    } catch (err) {
+        console.log("Greška:", err.message);
     }
-
-  } catch (err) {
-    console.error("Greška:", err.message);
-  }
 }
 
-console.log("🔥 RIPLY AI BOT AKTIVAN — AGRESIVNI + SIGURNI MOD UKLJUČEN 🔥");
+console.log("🔥 RIPLY C-MODE BOT AKTIVAN (SIGURAN + POLUAGRESIVAN) 🔥");
 setInterval(runBot, SCAN_INTERVAL);
