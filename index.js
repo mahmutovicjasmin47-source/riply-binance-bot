@@ -1,34 +1,22 @@
 import 'dotenv/config';
-import { default as Binance } from 'binance-api-node';
+import Binance from 'binance-api-node';
 
-// KONEKCIJA NA BINANCE
-const client = Binance({
+const client = Binance.default({
   apiKey: process.env.BINANCE_API_KEY,
   apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// GLAVNA FUNKCIJA
-async function start() {
-  console.log("Bot pokrenut...");
+// simple health check
+console.log("Bot started...");
 
+// basic loop
+async function loop() {
   try {
-    // Primjer provjere balansa
-    const balances = await client.accountInfo();
-    console.log("BALANS:", balances.balances);
-
-    // Primjer kupovine (NEĆE kupiti bez tvog poziva)
-    /*
-    await client.order({
-      symbol: 'BTCUSDC',
-      side: 'BUY',
-      type: 'MARKET',
-      quantity: 0.0001,
-    });
-    */
-
+    const prices = await client.prices();
+    console.log("Current prices:", prices.BTCUSDT);
   } catch (err) {
-    console.error("Greška:", err);
+    console.error("Error:", err);
   }
 }
 
-start();
+setInterval(loop, 5000);
