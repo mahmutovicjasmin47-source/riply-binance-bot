@@ -1,172 +1,107 @@
-import Binance from "binance-api-node";
+// ===========================
+// SPOT TRADING BOT – AGRESIVNI MOD
+// ===========================
 
-// 🔑 API ključevi iz Railway varijabli
+require('dotenv').config();
+const Binance = require('binance-api-node').default;
+
+// API ključevi
 const client = Binance({
   apiKey: process.env.BINANCE_API_KEY,
   apiSecret: process.env.BINANCE_API_SECRET
 });
 
-// 🟡 PARAMETRI BOTA
-const PAIR = "BTCUSDC";
-const CAPITAL_PERCENT = 0.70;     // koristi 70% kapitala
-const AUTO_INCREASE = 0.10;       // +10% nakon profita
-const MAX_MULTIPLIER = 3;         // sigurnosni limit
-const INTERVAL_MS = 1500;         // skeniranje svakih ~1.5 sekunde
+// SETTINGS
+const SYMBOL = "BTCUSDC";
+let baseTradePercent = 0.70;  // 70%
+let increasePerTrade = 0.10;  // 10% po tradu
+let currentTradePercent = baseTradePercent;
 
-// Trailing parametri
-const TRAIL_START = 0.003;        // 0.3% profit aktivira trailing
-const TRAIL_DISTANCE = 0.002;     // povlačenje 0.2%
-
-// Sigurnosne granice
-const STOP_LOSS = -0.008;         // max -0.8% gubitak
-const CRASH_DROP = -0.015;        // -1.5% u minuti → pauza
-const CRASH_WINDOW_MS = 60000;
-const CRASH_PAUSE_MIN = 5;
-const MIN_POSITION_USDC = 30;
-
-// 🟣 STATE
-let stakeMultiplier = 1;
-let trailingHigh = null;
-let pauseUntil = 0;
-let priceHistory = [];
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function getBalanceUSDC() {
-  const acc = await client.accountInfo();
-  const usdc = acc.balances.find(b => b.asset === "USDC");
-  return usdc ? parseFloat(usdc.free) : 0;
-}
+let inPosition = false;
+let entryPrice = 0;
+let trailingStop = 0;
 
 async function getPrice() {
-  const t = await client.prices({ symbol: PAIR });
-  return parseFloat(t[PAIR]);
+  const ticker = await client.prices({ symbol: SYMBOL });
+  return parseFloat(ticker[SYMBOL]);
 }
 
-async function getPosition() {
-  const trades = await client.myTrades({ symbol: PAIR });
-  if (!trades.length) return null;
-
-  const buys = trades.filter(t => t.isBuyer);
-  const sells = trades.filter(t => !t.isBuyer);
-
-  const buyQty = buys.reduce((a, t) => a + parseFloat(t.qty), 0);
-  const sellQty = sells.reduce((a, t) => a + parseFloat(t.qty), 0);
-
-  const qty = buyQty - sellQty;
-  if (qty <= 0) return null;
-
-  const totalBuyCost = buys.reduce((a, t) => a + parseFloat(t.qty) * parseFloat(t.price), 0);
-  const avg = totalBuyCost / buyQty;
-
-  return { qty, avgPrice: avg };
+async function getBalance() {
+  const balance = await client.accountInfo();
+  const usdc = balance.balances.find(b => b.asset === "USDC");
+  return parseFloat(usdc.free);
 }
 
-function crashGuard(price) {
-  const now = Date.now();
-  priceHistory.push({ time: now, price });
+async function buy() {
+  const usdcBalance = await getBalance();
+  const amountToSpend = usdcBalance * currentTradePercent;
 
-  priceHistory = priceHistory.filter(p => now - p.time <= CRASH_WINDOW_MS);
+  const price = await getPrice();
+  const quantity = (amountToSpend / price).toFixed(6);
 
-  if (priceHistory.length < 2) return;
+  console.log(`🟢 Kupujem ${quantity} BTC za ${amountToSpend} USDC`);
 
-  const start = priceHistory[0].price;
-  const drop = (price - start) / start;
+  const order = await client.order({
+    symbol: SYMBOL,
+    side: "BUY",
+    type: "MARKET",
+    quantity
+  });
 
-  if (drop <= CRASH_DROP) {
-    pauseUntil = now + CRASH_PAUSE_MIN * 60000;
-    console.log("⚠️ DETECTED MARKET DUMP → PAUSE ", CRASH_PAUSE_MIN, "min");
-  }
+  inPosition = true;
+  entryPrice = price;
+  trailingStop = price * 0.995; // 0.5% ispod ulaza
+  currentTradePercent += increasePerTrade;
+
+  return order;
 }
 
-async function buy(price) {
-  const balance = await getBalanceUSDC();
-  const stake = balance * CAPITAL_PERCENT * stakeMultiplier;
+async function sell() {
+  const balance = await client.accountInfo();
+  const btc = balance.balances.find(b => b.asset === "BTC");
+  const quantity = parseFloat(btc.free).toFixed(6);
 
-  if (stake < MIN_POSITION_USDC) {
-    console.log("Premalo USDC za ulaz.");
-    return;
-  }
+  console.log(`🔴 Prodajem ${quantity} BTC (trailing profit aktiviran)`);
 
-  const qty = stake / price;
+  const order = await client.order({
+    symbol: SYMBOL,
+    side: "SELL",
+    type: "MARKET",
+    quantity
+  });
 
+  inPosition = false;
+  currentTradePercent = baseTradePercent;
+
+  return order;
+}
+
+// MAIN LOOP
+async function botLoop() {
   try {
-    await client.order({
-      symbol: PAIR,
-      side: "BUY",
-      type: "MARKET",
-      quantity: qty.toFixed(5)
-    });
+    const price = await getPrice();
+    console.log(`📈 BTCUSDC: ${price}`);
 
-    trailingHigh = null;
-    console.log(`🟢 BUY: qty=${qty.toFixed(5)}, stake=${stake.toFixed(2)}`);
-  } catch (err) {
-    console.log("BUY ERROR:", err.message);
-  }
-}
-
-async function sell(pos, price, pnl) {
-  try {
-    await client.order({
-      symbol: PAIR,
-      side: "SELL",
-      type: "MARKET",
-      quantity: pos.qty.toFixed(5)
-    });
-
-    console.log(`🔴 SELL: PnL = ${(pnl * 100).toFixed(2)}%`);
-
-    stakeMultiplier = Math.min(stakeMultiplier * (1 + AUTO_INCREASE), MAX_MULTIPLIER);
-    console.log(`📈 NOVI MULTIPLIER: ${stakeMultiplier.toFixed(2)}x`);
-
-    trailingHigh = null;
-  } catch (err) {
-    console.log("SELL ERROR:", err.message);
-  }
-}
-
-async function tradeLoop() {
-  console.log("🔥 AGRESIVNI BOT STARTAN — BTCUSDC 🔥");
-
-  while (true) {
-    try {
-      const price = await getPrice();
-      crashGuard(price);
-
-      const now = Date.now();
-      if (now < pauseUntil) {
-        console.log("⏸ PAUZA ZBOG DUMPA...");
-        await sleep(INTERVAL_MS);
-        continue;
+    if (!inPosition) {
+      // SIGNAL ZA KUPOVINU (agresivno – trend gore)
+      if (price > trailingStop) {
+        await buy();
+      }
+    } else {
+      // TRAILING PROFIT LOGIKA
+      if (price > entryPrice) {
+        trailingStop = price * 0.997; // podiže stop kako raste cijena
       }
 
-      const pos = await getPosition();
-
-      if (!pos) {
-        await buy(price);
-      } else {
-        const pnl = (price - pos.avgPrice) / pos.avgPrice;
-
-        if (pnl <= STOP_LOSS) {
-          await sell(pos, price, pnl);
-        }
-
-        if (pnl >= TRAIL_START) {
-          if (!trailingHigh || price > trailingHigh) trailingHigh = price;
-
-          const stop = trailingHigh * (1 - TRAIL_DISTANCE);
-
-          if (price <= stop) {
-            await sell(pos, price, pnl);
-          }
-        }
+      if (price < trailingStop) {
+        await sell();
       }
-    } catch (err) {
-      console.log("LOOP ERROR:", err.message);
     }
 
-    await sleep(INTERVAL_MS);
+  } catch (err) {
+    console.log("⚠ Greška:", err.message);
   }
 }
 
-tradeLoop();
+console.log("🚀 Agresivni SPOT BOT POKRENUT...");
+setInterval(botLoop, 1000); // 1 sekunda
