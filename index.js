@@ -1,60 +1,23 @@
 import 'dotenv/config';
 import Binance from 'binance-api-node';
 
-const {
-  BINANCE_API_KEY,
-  BINANCE_API_SECRET,
-  SYMBOL,
-  POSITION_SIZE,
-  TAKE_PROFIT_PCT,
-  STOP_LOSS_PCT,
-  TRAILING_STOP,
-  TRAIL_OFFSET,
-  TRAIL_STEP
-} = process.env;
-
+// CONNECT CLIENT
 const client = Binance({
-  apiKey: BINANCE_API_KEY,
-  apiSecret: BINANCE_API_SECRET,
+  apiKey: process.env.BINANCE_API_KEY,
+  apiSecret: process.env.BINANCE_API_SECRET
 });
 
-// -------------------------------
-//  SIMPLE PRICE FETCH LOOP
-// -------------------------------
-
-async function getPrice() {
-  try {
-    const ticker = await client.prices({ symbol: SYMBOL });
-    return parseFloat(ticker[SYMBOL]);
-  } catch (err) {
-    console.error("Greška pri dohvaćanju cijene:", err);
-    return null;
-  }
-}
-
-// -------------------------------
-//   SIMPLE STRATEGY (PLACEHOLDER)
-// -------------------------------
-
-async function tradeLoop() {
+async function startBot() {
   console.log("Bot pokrenut...");
 
-  while (true) {
-    const price = await getPrice();
+  try {
+    const account = await client.accountInfo();
+    console.log("USPEŠNO POVEZANO SA BINANCE ✔️");
+    console.log("Balans:", account.balances);
 
-    if (!price) {
-      console.log("Nema cijene, preskačem ciklus...");
-      await new Promise(r => setTimeout(r, 4000));
-      continue;
-    }
-
-    console.log(`Cijena ${SYMBOL}: ${price}`);
-
-    // >>> Ovdje ide tvoja logika kupovine / prodaje <<<
-    // >>> Za sada je minimalna verzija da bot radi bez grešaka <<<
-
-    await new Promise(r => setTimeout(r, 5000));
+  } catch (error) {
+    console.error("GREŠKA:", error);
   }
 }
 
-tradeLoop();
+startBot();
