@@ -1,30 +1,27 @@
-import 'dotenv/config';
-import { Spot } from '@binance/connector';
+import Binance from 'binance';
+import dotenv from 'dotenv';
+dotenv.config();
 
-const apiKey = process.env.BINANCE_API_KEY;
-const apiSecret = process.env.BINANCE_API_SECRET;
+const client = Binance({
+  apiKey: process.env.BINANCE_API_KEY,
+  apiSecret: process.env.BINANCE_API_SECRET,
+});
 
-if (!apiKey || !apiSecret) {
-    console.error("❌ API KEY ili SECRET nedostaje!");
-    process.exit(1);
+/**
+ * Jednostavno: svake 2 sekunde čita BTC cijenu.
+ * To je test da bot radi stabilno.
+ * Poslije ti ubacim trading logiku (1% dnevno), ali prvo stabilnost!
+ */
+async function loop() {
+  try {
+    const price = await client.prices('BTCUSDT');
+    console.log("BTC:", price.BTCUSDT);
+  } catch (err) {
+    console.error("Greška:", err);
+  }
+
+  setTimeout(loop, 2000);
 }
 
-const client = new Spot(apiKey, apiSecret);
-
-// Glavni bot loop
-async function runBot() {
-    try {
-        console.log("✅ Bot je pokrenut...");
-
-        // Primjer: uzmi cijenu BTC-a
-        const price = await client.tickerPrice('BTCUSDT');
-        console.log("📈 BTC cijena:", price.data.price);
-
-        // Ovdje idu tvoje future logike (kupovina, prodaja, strategija...)
-
-    } catch (err) {
-        console.error("❌ Greška u botu:", err.message);
-    }
-}
-
-runBot();
+console.log("✅ Bot pokrenut...");
+loop();
