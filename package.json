@@ -1,12 +1,12 @@
 {
   "name": "riply-binance-bot",
   "version": "1.0.0",
-  "type": "module",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "type": "commonjs",
   "dependencies": {
     "binance-api-node": "^0.12.3"
+  },
+  "scripts": {
+    "start": "node index.js"
   }
 }
