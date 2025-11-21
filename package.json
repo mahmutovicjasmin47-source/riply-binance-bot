@@ -1,10 +1,9 @@
 {
-  "name": "riply-binance-bot",
+  "name": "aggressive-btc-bot",
   "version": "1.0.0",
-  "main": "index.js",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
-    "binance-api-node": "^0.12.3"
+    "binance-api-node": "^0.12.5"
   },
   "scripts": {
     "start": "node index.js"
