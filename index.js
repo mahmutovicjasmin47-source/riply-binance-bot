@@ -1,23 +1,34 @@
 import 'dotenv/config';
-import Binance from 'binance-api-node';
+import { default as Binance } from 'binance-api-node';
 
-// CONNECT CLIENT
+// KONEKCIJA NA BINANCE
 const client = Binance({
   apiKey: process.env.BINANCE_API_KEY,
-  apiSecret: process.env.BINANCE_API_SECRET
+  apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-async function startBot() {
+// GLAVNA FUNKCIJA
+async function start() {
   console.log("Bot pokrenut...");
 
   try {
-    const account = await client.accountInfo();
-    console.log("USPEŠNO POVEZANO SA BINANCE ✔️");
-    console.log("Balans:", account.balances);
+    // Primjer provjere balansa
+    const balances = await client.accountInfo();
+    console.log("BALANS:", balances.balances);
 
-  } catch (error) {
-    console.error("GREŠKA:", error);
+    // Primjer kupovine (NEĆE kupiti bez tvog poziva)
+    /*
+    await client.order({
+      symbol: 'BTCUSDC',
+      side: 'BUY',
+      type: 'MARKET',
+      quantity: 0.0001,
+    });
+    */
+
+  } catch (err) {
+    console.error("Greška:", err);
   }
 }
 
-startBot();
+start();
