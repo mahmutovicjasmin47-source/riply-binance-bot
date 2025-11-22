@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "binance": "^5.0.0",
-    "dotenv": "^16.3.1"
+    "@binance/connector": "3.6.1",
+    "dotenv": "16.3.1"
   }
 }
