@@ -1,137 +1,101 @@
-import dotenv from "dotenv";
-import { Spot } from "@binance/connector";
+import { Spot } from '@binance/connector';
+import dotenv from 'dotenv';
 dotenv.config();
 
-// ========================
-//  KLIJENT
-// ========================
 const client = new Spot(process.env.BINANCE_API_KEY, process.env.BINANCE_API_SECRET);
 
-// ========================
-//  POSTAVKE BOTA
-// ========================
-const SYMBOLS = ["BTCUSDC", "ETHUSDC"];  // tvoji parovi
-const POSITION_PCT = 0.70;               // ulaže 70% kapitala
-const TARGET_DAILY = 1.0;                // 1% dnevni cilj
-const TRAILING_SL = 0.35;                // trailing stop 0.35% (štiti profit)
-const COOL_DOWN = 8000;                  // 8 sekundi pauze između ulaza
+// === KONFIGURACIJA BOTA ===
+const PAIRS = ["BTCUSDC", "ETHUSDC"];
+const CAPITAL_PERCENT = 0.70;         // 70% kapitala
+const TAKE_PROFIT = 1.01;             // +1% profit target (minimalno)
+const TRAILING_BUFFER = 0.004;        // trailing take profit (0.4%)
+const STOP_LOSS = 0.97;               // -3% zaštita
+let positions = {};
 
-let dailyPNL = 0;
-let lastDay = new Date().toISOString().slice(0, 10);
-let inTrade = {};
+// --- FUNKCIJE ---
 
-// inicijalizira prazne pozicije
-SYMBOLS.forEach(sym => inTrade[sym] = { active: false, entry: 0, qty: 0 });
-
-
-// ========================
-//  FUNKCIJE
-// ========================
-async function getPrice(symbol) {
-  const res = await client.tickerPrice(symbol);
-  return Number(res.data.price);
-}
-
-async function getBalances() {
+async function getBalance(asset) {
   const acc = await client.account();
-  const list = acc.data.balances;
-  const usdc = Number(list.find(a => a.asset === "USDC")?.free ?? 0);
-  return usdc;
+  const balance = acc.data.balances.find(b => b.asset === asset);
+  return parseFloat(balance.free);
 }
 
-function pctChange(current, entry) {
-  return ((current - entry) / entry) * 100;
+async function getPrice(symbol) {
+  const ticker = await client.tickerPrice(symbol);
+  return parseFloat(ticker.data.price);
 }
 
-
-// ========================
-//  GLAVNA LOGIKA
-// ========================
-async function tradeSymbol(symbol) {
-  const now = new Date();
-  const dayKey = now.toISOString().slice(0, 10);
-
-  if (dayKey !== lastDay) {
-    dailyPNL = 0;
-    lastDay = dayKey;
-    console.log(`\n📅 Novi dan – reset`)
-  }
-
-  if (dailyPNL >= TARGET_DAILY) {
-    console.log(`🎯 Dnevni target ${TARGET_DAILY}% postignut – pauza`);
-    return;
-  }
-
+// --- KUPUJ ---
+async function buy(symbol) {
+  const usdc = await getBalance("USDC");
+  const invest = usdc * CAPITAL_PERCENT / PAIRS.length;
   const price = await getPrice(symbol);
+  const qty = (invest / price).toFixed(6);
 
-  // =======================
-  //  AKO SMO U POZICIJI → PROVJERA
-  // =======================
-  if (inTrade[symbol].active) {
+  await client.newOrder(symbol, "BUY", "MARKET", { quantity: qty });
 
-    const entry = inTrade[symbol].entry;
-    const p = pctChange(price, entry);
-
-    // trailing stop logika
-    if (p >= TRAILING_SL) {
-      console.log(`🔒 Trailing aktiviran ${symbol} +${p.toFixed(3)}%`);
-    }
-
-    // izlaz ako trailing padne
-    if (p < -0.25) {
-      console.log(`❌ Stop-loss ${symbol} (${p.toFixed(3)}%)`);
-      inTrade[symbol].active = false;
-      dailyPNL += p;
-      return;
-    }
-
-    // izlaz ako target po trejdu
-    if (p >= 0.5) {
-      console.log(`✅ Profit ${symbol} +${p.toFixed(3)}%`);
-      dailyPNL += p;
-      inTrade[symbol].active = false;
-      return;
-    }
-
-    return;
-  }
-
-  // =======================
-  //  AKO NISMO U POZICIJI → ULASCI
-  // =======================
-  const usdc = await getBalances();
-  const spend = usdc * POSITION_PCT;
-
-  if (spend < 5) return; // premalo
-
-  const qty = (spend / price).toFixed(6);
-
-  // simulirani ulaz
-  inTrade[symbol] = {
-    active: true,
+  positions[symbol] = {
     entry: price,
-    qty: qty
+    highest: price
   };
 
   console.log(`🟢 BUY ${symbol} @ ${price} qty=${qty}`);
 }
 
-
-// ========================
-//  LOOP
-// ========================
-async function loop() {
-  try {
-    for (const sym of SYMBOLS) {
-      await tradeSymbol(sym);
-      await new Promise(r => setTimeout(r, COOL_DOWN));
-    }
-  } catch (err) {
-    console.log("Greška:", err.message);
+// --- PRODAJ ---
+async function sell(symbol) {
+  const asset = symbol.replace("USDC", "");
+  const bal = await getBalance(asset);
+  if (bal > 0) {
+    await client.newOrder(symbol, "SELL", "MARKET", { quantity: bal });
+    console.log(`🔴 SELL ${symbol} @ market`);
   }
-
-  setTimeout(loop, 2000);
+  positions[symbol] = null;
 }
 
+// --- GLAVNA LOGIKA ---
+async function trade() {
+  try {
+    for (const symbol of PAIRS) {
+      const price = await getPrice(symbol);
+
+      // Ako nema pozicije → KUPUJ
+      if (!positions[symbol]) {
+        await buy(symbol);
+        continue;
+      }
+
+      let pos = positions[symbol];
+
+      // Update highest
+      if (price > pos.highest) pos.highest = price;
+
+      // Trailing take profit
+      if (price <= pos.highest * (1 - TRAILING_BUFFER)) {
+        console.log(`📉 Trailing TP triggered for ${symbol}`);
+        await sell(symbol);
+        continue;
+      }
+
+      // Normalni take profit 1%
+      if (price >= pos.entry * TAKE_PROFIT) {
+        console.log(`🏆 Take profit hit for ${symbol}`);
+        await sell(symbol);
+        continue;
+      }
+
+      // Stop-loss
+      if (price <= pos.entry * STOP_LOSS) {
+        console.log(`🛑 Stop-loss hit for ${symbol}`);
+        await sell(symbol);
+        continue;
+      }
+    }
+  } catch (e) {
+    console.log("Greška:", e);
+  }
+}
+
+// --- PETLJA 24/7 ---
 console.log("🤖 Stabilni bot (Opcija A) pokrenut...");
-loop();
+setInterval(trade, 7000);
