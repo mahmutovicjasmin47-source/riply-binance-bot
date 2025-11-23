@@ -1,58 +1,122 @@
-const Binance = require('binance-api-node').default;
+import Binance from "binance-api-node";
 
-// Binance client (uzima ključeve iz Railway varijabli)
-const client = Binance({
-    apiKey: process.env.BINANCE_API_KEY,
-    apiSecret: process.env.BINANCE_API_SECRET
+// Klijent
+const client = Binance.default({
+  apiKey: process.env.BINANCE_API_KEY,
+  apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// Trading parovi
-const PAIRS = ["BTCUSDC", "ETHUSDC"];
-
-// Live ili test mode
+// 🔥 Live ili test mode
 const LIVE = process.env.LIVE_TRADING === "true";
 
-// Amount (možeš mijenjati)
-const BUY_AMOUNT = 10; // 10 USDC po kupovini
+// Parovi koje trgujemo
+const PAIRS = ["BTCUSDC", "ETHUSDC"];
+
+// Koliko kupujemo (u USDC)
+const ORDER_SIZE = 10;
+
+// Trailing – koliko čekamo i koliko diže stop
+const TRAILING_DISTANCE = 0.003;
+
+// Anti-loss minimalni profit
+const MIN_PROFIT = 0.01;
 
 console.log("🤖 ULTIMATE BOT pokrenut...");
 console.log("Live trading:", LIVE);
 console.log("Parovi:", PAIRS.join(", "));
 console.log("----------------------------------------");
 
-async function tradeLoop() {
-    try {
-        for (const symbol of PAIRS) {
-            const price = await client.prices({ symbol });
-            const current = parseFloat(price[symbol]);
-
-            console.log(`⏱️ ${symbol}: ${current}`);
-
-            if (!LIVE) {
-                console.log(`🟡 TEST MODE BUY ${symbol}`);
-                continue;
-            }
-
-            // LIVE BUY
-            try {
-                const order = await client.order({
-                    symbol,
-                    side: 'BUY',
-                    type: 'MARKET',
-                    quoteOrderQty: BUY_AMOUNT.toString()
-                });
-
-                console.log(`🟢 BUY EXECUTED ${symbol}`, order);
-            } catch (err) {
-                console.log(`❌ BUY ERROR ${symbol}:`, err.body || err.message);
-            }
-        }
-    } catch (e) {
-        console.log("❌ General error:", e);
-    }
+async function getPrice(symbol) {
+  try {
+    const r = await client.prices({ symbol });
+    return parseFloat(r[symbol]);
+  } catch (err) {
+    console.log("❌ PRICE ERROR:", err.message);
+    return null;
+  }
 }
 
-// Loop svakih 30 sekundi
-setInterval(tradeLoop, 30000);
+async function buy(symbol) {
+  try {
+    if (!LIVE) {
+      console.log("🟡 TEST MODE BUY", symbol);
+      return null;
+    }
+
+    const order = await client.order({
+      symbol,
+      side: "BUY",
+      type: "MARKET",
+      quoteOrderQty: ORDER_SIZE.toString(),
+    });
+
+    console.log("🟢 BUY EXECUTED", symbol, order);
+    return order;
+  } catch (err) {
+    console.log("❌ BUY ERROR:", err.body || err);
+    return null;
+  }
+}
+
+async function sell(symbol, quantity) {
+  try {
+    if (!LIVE) {
+      console.log("🟡 TEST MODE SELL", symbol);
+      return null;
+    }
+
+    const order = await client.order({
+      symbol,
+      side: "SELL",
+      type: "MARKET",
+      quantity: quantity.toString(),
+    });
+
+    console.log("🔴 SELL EXECUTED", symbol, order);
+    return order;
+  } catch (err) {
+    console.log("❌ SELL ERROR:", err.body || err);
+    return null;
+  }
+}
+
+async function tradeLoop() {
+  for (const symbol of PAIRS) {
+    const price = await getPrice(symbol);
+    if (!price) continue;
+
+    console.log("⏱️", symbol, price);
+
+    // BUY ORDER
+    const buyOrder = await buy(symbol);
+    if (!buyOrder) continue;
+
+    const qty = parseFloat(buyOrder.executedQty);
+    let entry = price;
+    let trailingStop = entry * (1 - TRAILING_DISTANCE);
+
+    // Trailing loop
+    let active = true;
+    while (active) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const p = await getPrice(symbol);
+      if (!p) continue;
+
+      // Update trailing
+      if (p > entry) {
+        entry = p;
+        trailingStop = entry * (1 - TRAILING_DISTANCE);
+      }
+
+      // Hit stop
+      if (p <= trailingStop && p > entry * (1 + MIN_PROFIT)) {
+        await sell(symbol, qty);
+        active = false;
+      }
+    }
+  }
+
+  setTimeout(tradeLoop, 5000);
+}
 
 tradeLoop();
