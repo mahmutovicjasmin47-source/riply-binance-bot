@@ -1,12 +1,13 @@
 {
   "name": "ultimate-bot",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
-  "dependencies": {
-    "node-binance-api": "^1.0.0"
-  },
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "@binance/connector": "^3.6.1"
   }
 }
