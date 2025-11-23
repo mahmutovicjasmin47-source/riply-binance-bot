@@ -1,43 +1,49 @@
 import Binance from "binance-api-node";
 
+// 🔐 API ključ
 const client = Binance.default({
   apiKey: process.env.BINANCE_API_KEY,
   apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// Live ili test mode
+// 🔥 Live trading ON/OFF
 const LIVE = process.env.LIVE_TRADING === "true";
 
-// Parovi
+// Parovi koje bot koristi
 const PAIRS = ["BTCUSDC", "ETHUSDC"];
 
-// Iznos kupovine
+// Iznos kupovine u USDC
 const ORDER_SIZE = 10;
 
-// Trailing stop
-const TRAILING_DISTANCE = 0.003;
-const MIN_PROFIT = 0.01;
+// Trailing stop parametri
+const TRAILING_DISTANCE = 0.003;  // 0.3%
+const MIN_PROFIT = 0.01;          // 1%
 
-console.log("🤖 BOT POKRENUT...");
+console.log("🤖 ULTIMATE BOT POKRENUT");
 console.log("Live trading:", LIVE);
 console.log("Parovi:", PAIRS.join(", "));
+console.log("-------------------------------------");
 
-// ---- PRICE ----
+// ================================
+// 📌 Cijena
+// ================================
 async function getPrice(symbol) {
   try {
-    const r = await client.prices({ symbol });
-    return parseFloat(r[symbol]);
+    const p = await client.prices({ symbol });
+    return parseFloat(p[symbol]);
   } catch (err) {
     console.log("❌ PRICE ERROR:", err.message);
     return null;
   }
 }
 
-// ---- BUY ----
+// ================================
+// 📌 MARKET BUY
+// ================================
 async function buy(symbol) {
   try {
     if (!LIVE) {
-      console.log("🟡 TEST BUY", symbol);
+      console.log("🟡 TEST BUY:", symbol);
       return { executedQty: "0.0001" };
     }
 
@@ -48,43 +54,48 @@ async function buy(symbol) {
       quoteOrderQty: ORDER_SIZE.toString(),
     });
 
-    console.log("🟢 BUY EXECUTED", symbol, order);
+    console.log("🟢 BUY EXECUTED:", symbol, order);
     return order;
+
   } catch (err) {
     console.log("❌ BUY ERROR:", err.body || err);
     return null;
   }
 }
 
-// ---- SELL ----
+// ================================
+// 📌 MARKET SELL
+// ================================
 async function sell(symbol, qty) {
   try {
     if (!LIVE) {
-      console.log("🟡 TEST SELL", symbol);
-      return null;
+      console.log("🟡 TEST SELL:", symbol);
+      return;
     }
 
-    const o = await client.order({
+    const order = await client.order({
       symbol,
       side: "SELL",
       type: "MARKET",
       quantity: qty.toString(),
     });
 
-    console.log("🔴 SELL EXECUTED", symbol, o);
-    return o;
+    console.log("🔴 SELL EXECUTED:", symbol, order);
+    return order;
+
   } catch (err) {
     console.log("❌ SELL ERROR:", err.body || err);
-    return null;
   }
 }
 
-// ---- TRADE ----
+// ================================
+// 📌 GLAVNI TRADE LOOP
+// ================================
 async function trade(symbol) {
+  console.log(`⏱️ START: ${symbol}`);
+  
   const price = await getPrice(symbol);
   if (!price) return;
-
-  console.log("⏱️ START:", symbol, price);
 
   const buyOrder = await buy(symbol);
   if (!buyOrder) return;
@@ -93,30 +104,37 @@ async function trade(symbol) {
   let entry = price;
   let trailingStop = entry * (1 - TRAILING_DISTANCE);
 
+  console.log(`📈 ENTRY ${symbol}: ${entry}`);
+
   let active = true;
+
   while (active) {
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 3000));
+    const current = await getPrice(symbol);
+    if (!current) continue;
 
-    const p = await getPrice(symbol);
-    if (!p) continue;
-
-    if (p > entry) {
-      entry = p;
+    // Update trailing
+    if (current > entry) {
+      entry = current;
       trailingStop = entry * (1 - TRAILING_DISTANCE);
     }
 
-    if (p <= trailingStop && p > entry * (1 + MIN_PROFIT)) {
+    // Sell trigger
+    if (current <= trailingStop && current > entry * (1 + MIN_PROFIT)) {
       await sell(symbol, qty);
       active = false;
     }
   }
 }
 
-// 🌙 INFINITE LOOP – radi NON STOP
+// ================================
+// ♾️ Infinite Loop
+// ================================
 async function loop() {
   while (true) {
-    for (const pair of PAIRS) {
-      await trade(pair);
+    for (const symbol of PAIRS) {
+      await trade(symbol);
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 }
