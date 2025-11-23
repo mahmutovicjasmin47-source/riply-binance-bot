@@ -1,14 +1,15 @@
 {
   "name": "ultimate-bot",
   "version": "1.0.0",
+  "description": "Ultimate Binance Trading Bot",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.6.7",
-    "crypto-js": "^4.2.0",
-    "dotenv": "^16.4.5"
+    "binance-api-node": "^0.12.5"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
