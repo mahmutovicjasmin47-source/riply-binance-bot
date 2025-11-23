@@ -1,122 +1,135 @@
-import 'dotenv/config';
-import { Spot } from '@binance/connector';
+import dotenv from "dotenv";
+import { Spot } from "@binance/connector";
+
+dotenv.config();
 
 const apiKey = process.env.BINANCE_API_KEY;
 const apiSecret = process.env.BINANCE_API_SECRET;
-
 const client = new Spot(apiKey, apiSecret);
 
-// Podesavanja
 const PAIRS = ["BTCUSDC", "ETHUSDC"];
-const CAPITAL_PERCENT = 0.70;
-const TRAILING_PERCENT = 0.35;   // trailing take profit
-const SAFETY_DROP = -3;          // max dozvoljeni pad prije zaštitne prodaje
+const CAPITAL_PERCENT = 0.7; // 70%
+const DAILY_TARGET = 1.01; // 1% profit cilj
+const TRAILING_PERCENT = 0.003; // 0.3% trailing safety
+const CHECK_INTERVAL = 5000; // svakih 5 sekundi
 
-let entryPrices = {};
-let trailingHigh = {};
-let positions = {};
+let boughtPrices = {};
+let trailingStops = {};
+let invested = false;
+let startBalance = null;
 
+// ----------- GET BALANCE -----------
 async function getBalance() {
-  const res = await client.userAsset();
-  return res.data;
+  const acc = await client.account();
+  const usdc = acc.data.balances.find(b => b.asset === "USDC");
+  return parseFloat(usdc.free);
 }
 
+// ----------- GET PRICE -----------
 async function getPrice(symbol) {
-  const res = await client.tickerPrice(symbol);
-  return Number(res.data.price);
+  const r = await client.tickerPrice(symbol);
+  return parseFloat(r.data.price);
 }
 
-async function buy(symbol) {
-  const balance = await getBalance();
-  const usdcObj = balance.find(a => a.asset === "USDC");
-  if (!usdcObj) return console.log("❌ Nema USDC!");
-
-  const free = Number(usdcObj.free);
-  const amount = free * CAPITAL_PERCENT;
-
-  if (amount < 5) return console.log("❌ Premalo USDC za trgovanje!");
-
-  const price = await getPrice(symbol);
-  const qty = (amount / price).toFixed(5);
-
+// ----------- BUY -----------
+async function buy(symbol, amountUSDC) {
   try {
-    const order = await client.newOrder(symbol, "BUY", "MARKET", { quantity: qty });
-    console.log(`🟢 BUY ${symbol} @ ${price} qty=${qty}`);
+    const price = await getPrice(symbol);
+    const qty = (amountUSDC / price).toFixed(6);
 
-    entryPrices[symbol] = price;
-    trailingHigh[symbol] = price;
-    positions[symbol] = true;
-  } catch (e) {
-    console.log("❌ BUY greška:", e.response?.data || e);
+    await client.newOrder(symbol, "BUY", "MARKET", { quantity: qty });
+
+    boughtPrices[symbol] = price;
+    trailingStops[symbol] = price * (1 - TRAILING_PERCENT);
+
+    console.log(`🟢 BUY ${symbol} @ ${price} qty=${qty}`);
+  } catch (err) {
+    console.log(`❌ BUY ERROR ${symbol}:`, err.response?.data || err);
   }
 }
 
+// ----------- SELL -----------
 async function sell(symbol) {
   try {
-    const balance = await getBalance();
-    const asset = symbol.replace("USDC", "");
-    const coin = balance.find(a => a.asset === asset);
+    const acc = await client.account();
+    const a = acc.data.balances.find(b => b.asset === symbol.replace("USDC", ""));
+    const qty = parseFloat(a.free).toFixed(6);
 
-    if (!coin || Number(coin.free) === 0) return;
-
-    const qty = Number(coin.free).toFixed(5);
-
-    await client.newOrder(symbol, "SELL", "MARKET", { quantity: qty });
-
-    console.log(`🔴 SELL ${symbol} qty=${qty}`);
-    positions[symbol] = false;
-  } catch (e) {
-    console.log("❌ SELL greška:", e.response?.data || e);
-  }
-}
-
-async function loop() {
-  for (const symbol of PAIRS) {
-    try {
-      const price = await getPrice(symbol);
-      console.log(`⏱️ ${symbol}: ${price}`);
-
-      // Ako nema pozicije — kupi
-      if (!positions[symbol]) {
-        await buy(symbol);
-        continue;
-      }
-
-      // Ako postoji pozicija — trailing logika
-      if (positions[symbol]) {
-        const entry = entryPrices[symbol];
-
-        // Trailing high update
-        if (price > trailingHigh[symbol]) {
-          trailingHigh[symbol] = price;
-        }
-
-        // Ako je pao ispod trailing % — prodaj
-        const dropFromHigh = ((price - trailingHigh[symbol]) / trailingHigh[symbol]) * 100;
-
-        if (dropFromHigh < -TRAILING_PERCENT) {
-          console.log(`🔻 Trailing SELL trigger (${symbol})`);
-          await sell(symbol);
-          continue;
-        }
-
-        // Safety net — max dozvoljen gubitak
-        const loss = ((price - entry) / entry) * 100;
-
-        if (loss < SAFETY_DROP) {
-          console.log(`⚠️ Safety SELL trigger (${symbol})`);
-          await sell(symbol);
-          continue;
-        }
-      }
-
-    } catch (err) {
-      console.log(`⚠️ Greška u loop-u:`, err.response?.data || err);
+    if (qty > 0.00001) {
+      await client.newOrder(symbol, "SELL", "MARKET", { quantity: qty });
+      console.log(`🔴 SELL ${symbol} qty=${qty}`);
     }
+  } catch (err) {
+    console.log(`❌ SELL ERROR ${symbol}:`, err.response?.data || err);
   }
 }
 
-console.log("🤖 ULTIMATE Bot (Opcija C) pokrenut...");
+// ----------- MAIN LOOP -----------
+async function loop() {
+  try {
+    const balance = await getBalance();
 
-// Loop svakih 5 sekundi
-setInterval(loop, 5000);
+    // Init start balance
+    if (!startBalance) startBalance = balance;
+
+    const totalBalance = balance;
+
+    // MAIN LOG
+    const prices = {};
+    for (let p of PAIRS) {
+      prices[p] = await getPrice(p);
+    }
+
+    console.log(`⏱  BTC: ${prices.BTCUSDC}   |   ETH: ${prices.ETHUSDC}`);
+
+    // ------------------- BUY LOGIC -------------------
+    if (!invested) {
+      const investUSDC = totalBalance * CAPITAL_PERCENT;
+
+      console.log("🟦 Kupovina aktivirana...");
+
+      await buy("BTCUSDC", investUSDC / 2);
+      await buy("ETHUSDC", investUSDC / 2);
+
+      invested = true;
+      return;
+    }
+
+    // ------------------- TRAILING TAKE PROFIT -------------------
+    for (let sym of PAIRS) {
+      if (!boughtPrices[sym]) continue;
+
+      const price = prices[sym];
+
+      // Move trailing stop up
+      if (price > boughtPrices[sym]) {
+        trailingStops[sym] = price * (1 - TRAILING_PERCENT);
+      }
+
+      // Trigger trailing stop
+      if (price <= trailingStops[sym]) {
+        console.log(`⚠️ TRAILING STOP TRIGGERED for ${sym}`);
+        await sell(sym);
+        invested = false;
+        return;
+      }
+    }
+
+    // ------------------- DAILY PROFIT TARGET -------------------
+    if (totalBalance >= startBalance * DAILY_TARGET) {
+      console.log("🏆 DNEVNI PROFIT OSTVAREN — SELL ALL");
+      await sell("BTCUSDC");
+      await sell("ETHUSDC");
+      invested = false;
+      return;
+    }
+
+  } catch (err) {
+    console.log("⚠️ Loop error:", err.response?.data || err.message);
+  }
+}
+
+// Run continuously every 5 seconds
+setInterval(loop, CHECK_INTERVAL);
+
+console.log("🤖 Ultimate Bot (Opcija C) — ACTIVE 24/7");
