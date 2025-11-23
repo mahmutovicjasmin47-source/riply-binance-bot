@@ -1,48 +1,48 @@
 import Binance from "binance-api-node";
 
-// 🔐 Povezivanje API ključeva
+// 🔐 API ključevi iz Railway varijabli
 const client = Binance.default({
   apiKey: process.env.BINANCE_API_KEY,
   apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// 🔥 Live ili test mode
+// 🔥 Live mode
 const LIVE = process.env.LIVE_TRADING === "true";
 
-// Parovi koje bot trguje
+// Parovi
 const PAIRS = ["BTCUSDC", "ETHUSDC"];
 
-// Koliko kupujemo u USDC
+// Iznos kupovine
 const ORDER_SIZE = 10;
 
-// Trailing stop distance
-const TRAILING_DISTANCE = 0.003; // 0.3%
+// Trailing stop distance (0.3%)
+const TRAILING_DISTANCE = 0.003;
 
-// Minimalni profit za SELL
-const MIN_PROFIT = 0.01; // 1%
+// Minimalni profit (1%)
+const MIN_PROFIT = 0.01;
 
-console.log("🤖 ULTIMATE BOT pokrenut...");
-console.log("Live trading:", LIVE);
+console.log("🤖 ULTIMATE BOT pokrenut (Opcija C)");
+console.log("Live:", LIVE);
 console.log("Parovi:", PAIRS.join(", "));
 console.log("----------------------------------------");
 
-// 📌 Cijena
+// 📌 Dohvati cijenu
 async function getPrice(symbol) {
   try {
-    const p = await client.prices({ symbol });
-    return parseFloat(p[symbol]);
+    const r = await client.prices({ symbol });
+    return parseFloat(r[symbol]);
   } catch (err) {
     console.log("❌ PRICE ERROR:", err.message);
     return null;
   }
 }
 
-// 📌 MARKET BUY
+// 📌 BUY MARKET
 async function buy(symbol) {
   try {
     if (!LIVE) {
-      console.log("🟡 TEST MODE BUY", symbol);
-      return { executedQty: "0.0000" };
+      console.log("🟡 TEST BUY:", symbol);
+      return { executedQty: "0.003" };
     }
 
     const order = await client.order({
@@ -52,7 +52,7 @@ async function buy(symbol) {
       quoteOrderQty: ORDER_SIZE.toString(),
     });
 
-    console.log("🟢 BUY EXECUTED", symbol, order);
+    console.log("🟢 BUY EXECUTED:", symbol, order);
     return order;
   } catch (err) {
     console.log("❌ BUY ERROR:", err.body || err);
@@ -60,11 +60,11 @@ async function buy(symbol) {
   }
 }
 
-// 📌 MARKET SELL
-async function sell(symbol, qty) {
+// 📌 SELL MARKET
+async function sell(symbol, quantity) {
   try {
     if (!LIVE) {
-      console.log("🟡 TEST MODE SELL", symbol);
+      console.log("🟡 TEST SELL:", symbol);
       return;
     }
 
@@ -72,54 +72,59 @@ async function sell(symbol, qty) {
       symbol,
       side: "SELL",
       type: "MARKET",
-      quantity: qty.toString(),
+      quantity: quantity.toString(),
     });
 
-    console.log("🔴 SELL EXECUTED", symbol, order);
+    console.log("🔴 SELL EXECUTED:", symbol, order);
   } catch (err) {
     console.log("❌ SELL ERROR:", err.body || err);
   }
 }
 
-// 📌 GLAVNI LOOP — radi 24/7
-async function tradeLoop() {
-  for (const symbol of PAIRS) {
-    const price = await getPrice(symbol);
-    if (!price) continue;
+// 📌 Glavni trading loop
+async function trade(symbol) {
+  const entryPrice = await getPrice(symbol);
+  if (!entryPrice) return;
 
-    console.log("⏱️ Cijena:", symbol, price);
+  console.log("⏱️ START:", symbol, entryPrice);
 
-    const buyOrder = await buy(symbol);
-    if (!buyOrder || !buyOrder.executedQty) continue;
+  const buyOrder = await buy(symbol);
+  if (!buyOrder) return;
 
-    const qty = parseFloat(buyOrder.executedQty);
-    let entry = price;
-    let trailingStop = entry * (1 - TRAILING_DISTANCE);
+  const qty = parseFloat(buyOrder.executedQty);
 
-    console.log(`▶️ Trailing start ${symbol}: entry ${entry}, stop ${trailingStop}`);
+  let highPrice = entryPrice;
+  let trailingStop = highPrice * (1 - TRAILING_DISTANCE);
 
-    let active = true;
+  // ✔️ Loop prati tržište
+  while (true) {
+    await new Promise((r) => setTimeout(r, 4000));
+    const p = await getPrice(symbol);
+    if (!p) continue;
 
-    while (active) {
-      await new Promise((r) => setTimeout(r, 3000));
+    // Update high price
+    if (p > highPrice) {
+      highPrice = p;
+      trailingStop = highPrice * (1 - TRAILING_DISTANCE);
+    }
 
-      const p = await getPrice(symbol);
-      if (!p) continue;
-
-      // Ako cijena raste → trailing raste
-      if (p > entry) {
-        entry = p;
-        trailingStop = entry * (1 - TRAILING_DISTANCE);
-      }
-
-      // Ako padne ispod trailing stopa → SELL
-      if (p <= trailingStop && p > entry * (1 + MIN_PROFIT)) {
-        console.log("🔻 Trailing stop aktiviran!", symbol);
-        await sell(symbol, qty);
-        active = false;
-      }
+    // Trailing stop triggered
+    if (p <= trailingStop && p > entryPrice * (1 + MIN_PROFIT)) {
+      console.log("📉 TRAILING STOP HIT -> SELL", symbol);
+      await sell(symbol, qty);
+      return;
     }
   }
 }
 
-setInterval(tradeLoop, 8000);
+// 📌 Bot radi non-stop
+async function loop() {
+  while (true) {
+    for (const pair of PAIRS) {
+      await trade(pair);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+
+loop();
