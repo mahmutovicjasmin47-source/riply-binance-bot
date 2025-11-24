@@ -1,45 +1,40 @@
 import Binance from "binance-api-node";
 
-// 🔐 API
+// 🔐 API povezivanje
 const client = Binance.default({
   apiKey: process.env.BINANCE_API_KEY,
   apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// 🔥 Live mode
+// ⚙️ KONFIGURACIJA
 const LIVE = process.env.LIVE_TRADING === "true";
-
-// Parovi
 const PAIRS = ["BTCUSDC", "ETHUSDC"];
 
-// Iznos za kupovinu
+// 💰 Veličina kupovine
 const ORDER_SIZE = 10;
 
-// Koliko često bot loop-a
-const LOOP_TIME = 5000;
+// 📈 Opcija C — srednji rizik
+const MIN_PROFIT = 0.004;          // 0.4% profit
+const TRAILING_DISTANCE = 0.002;   // 0.2% trailing stop
+const STOP_LOSS = 0.006;           // 0.6% maksimalni minus
+const MAX_RETRIES = 3;
 
-console.log("🤖 ULTIMATE BOT — OPCIJA A (stalno)");
-console.log("PAIRS:", PAIRS.join(", "));
-console.log("LIVE:", LIVE);
-console.log("----------------------------------------");
+// ---------------------- UTIL FUNKCIJE ----------------------
 
-// Cijena
 async function getPrice(symbol) {
   try {
-    const r = await client.prices({ symbol });
-    return parseFloat(r[symbol]);
-  } catch (e) {
-    console.log("❌ PRICE ERROR:", e.message);
+    const p = await client.prices({ symbol });
+    return parseFloat(p[symbol]);
+  } catch {
     return null;
   }
 }
 
-// BUY
 async function buy(symbol) {
   try {
     if (!LIVE) {
-      console.log("🟡 TEST BUY", symbol);
-      return { executedQty: "0.00000" };
+      console.log(`🟡 TEST BUY ${symbol}`);
+      return { executedQty: "0.0000" };
     }
 
     const order = await client.order({
@@ -51,27 +46,114 @@ async function buy(symbol) {
 
     console.log("🟢 BUY EXECUTED", symbol);
     return order;
-
-  } catch (e) {
-    console.log("❌ BUY ERROR:", e.body || e.message);
+  } catch (err) {
+    console.log("❌ BUY ERROR:", err.body || err);
     return null;
   }
 }
 
-// Glavna petlja — OPCIJA A (stalno)
-async function loop() {
-  for (const symbol of PAIRS) {
-    console.log("⏱️ START:", symbol);
+async function sell(symbol, qty) {
+  try {
+    if (!LIVE) {
+      console.log(`🟡 TEST SELL ${symbol}`);
+      return;
+    }
+
+    const order = await client.order({
+      symbol,
+      side: "SELL",
+      type: "MARKET",
+      quantity: qty.toString(),
+    });
+
+    console.log("🔴 SELL EXECUTED", symbol);
+    return order;
+  } catch (err) {
+    console.log("❌ SELL ERROR:", err.body || err);
+  }
+}
+
+// ---------------------- GLAVNI TRADE LOOP ----------------------
+
+async function tradeSymbol(symbol) {
+  console.log(`⏱ START: ${symbol}`);
+
+  let retries = 0;
+  let buyOrder = null;
+
+  // 🟢 Pokušaj kupovine
+  while (!buyOrder && retries < MAX_RETRIES) {
+    buyOrder = await buy(symbol);
+    if (!buyOrder) {
+      retries++;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+
+  if (!buyOrder) {
+    console.log(`⛔ ${symbol} — odustajem nakon ${MAX_RETRIES} pokušaja.`);
+    return;
+  }
+
+  const qty = parseFloat(buyOrder.executedQty);
+  let entryPrice = await getPrice(symbol);
+  let highestPrice = entryPrice;
+
+  console.log(`📌 ENTRY ${symbol}: ${entryPrice}`);
+
+  let active = true;
+
+  while (active) {
+    await new Promise((r) => setTimeout(r, 3000));
 
     const price = await getPrice(symbol);
     if (!price) continue;
 
-    const order = await buy(symbol);
-    if (!order) continue;
+    // 🔼 Update highest price
+    if (price > highestPrice) highestPrice = price;
+
+    // 🟢 Profit target
+    if (price >= entryPrice * (1 + MIN_PROFIT)) {
+      console.log(`🏆 PROFIT HIT ${symbol}`);
+      await sell(symbol, qty);
+      active = false;
+      break;
+    }
+
+    // 🔻 Trailing stop
+    if (price <= highestPrice * (1 - TRAILING_DISTANCE)) {
+      console.log(`🔻 TRAILING STOP ${symbol}`);
+      await sell(symbol, qty);
+      active = false;
+      break;
+    }
+
+    // 🚨 Stop loss
+    if (price <= entryPrice * (1 - STOP_LOSS)) {
+      console.log(`⚠️ STOP LOSS ${symbol}`);
+      await sell(symbol, qty);
+      active = false;
+      break;
+    }
   }
 
-  setTimeout(loop, LOOP_TIME);
+  console.log(`🔄 ${symbol} — novi ciklus...`);
 }
 
-// Start
-loop();
+// ---------------------- GLOBAL LOOP ----------------------
+
+async function startBot() {
+  console.log("🤖 ULTIMATE BOT — OPCIJA C (Srednji rizik) pokrenut!");
+  console.log("Parovi:", PAIRS.join(", "));
+  console.log("Live:", LIVE);
+  console.log("-------------------------------------");
+
+  while (true) {
+    for (const pair of PAIRS) {
+      await tradeSymbol(pair);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
+startBot();
