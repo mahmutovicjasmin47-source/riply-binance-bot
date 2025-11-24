@@ -1,46 +1,47 @@
 import Binance from "binance-api-node";
 
+// 🔐 API
 const client = Binance.default({
   apiKey: process.env.BINANCE_API_KEY,
   apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// 🔥 Live trading (obavezno postavi LIVE_TRADING=true u Railway)
+// 🔥 Live mode
 const LIVE = process.env.LIVE_TRADING === "true";
 
-// ☑ Parovi
+// Parovi
 const PAIRS = ["BTCUSDC", "ETHUSDC"];
 
-// ☑ Iznos kupovine (USDC)
+// Iznos za kupovinu
 const ORDER_SIZE = 10;
 
-// ☑ Trailing stop (0.3%)
-const TRAILING = 0.003;
+// Koliko često bot loop-a
+const LOOP_TIME = 5000;
 
-// ☑ Minimalni profit da omogući SELL
-const MIN_PROFIT = 0.01;
-
-console.log("🤖 ULTIMATE BOT – OPCIJA A (stalno)");
+console.log("🤖 ULTIMATE BOT — OPCIJA A (stalno)");
+console.log("PAIRS:", PAIRS.join(", "));
 console.log("LIVE:", LIVE);
-console.log("PAROVI:", PAIRS.join(", "));
-console.log("-------------------------------------");
+console.log("----------------------------------------");
 
+// Cijena
 async function getPrice(symbol) {
   try {
     const r = await client.prices({ symbol });
     return parseFloat(r[symbol]);
-  } catch {
+  } catch (e) {
+    console.log("❌ PRICE ERROR:", e.message);
     return null;
   }
 }
 
+// BUY
 async function buy(symbol) {
-  if (!LIVE) {
-    console.log("🟡 TEST BUY:", symbol);
-    return { executedQty: "0.0001" };
-  }
-
   try {
+    if (!LIVE) {
+      console.log("🟡 TEST BUY", symbol);
+      return { executedQty: "0.00000" };
+    }
+
     const order = await client.order({
       symbol,
       side: "BUY",
@@ -50,70 +51,27 @@ async function buy(symbol) {
 
     console.log("🟢 BUY EXECUTED", symbol);
     return order;
-  } catch (err) {
-    console.log("❌ BUY ERROR:", err.body || err);
+
+  } catch (e) {
+    console.log("❌ BUY ERROR:", e.body || e.message);
     return null;
   }
 }
 
-async function sell(symbol, qty) {
-  if (!LIVE) {
-    console.log("🟡 TEST SELL:", symbol);
-    return;
-  }
+// Glavna petlja — OPCIJA A (stalno)
+async function loop() {
+  for (const symbol of PAIRS) {
+    console.log("⏱️ START:", symbol);
 
-  try {
-    const order = await client.order({
-      symbol,
-      side: "SELL",
-      type: "MARKET",
-      quantity: qty.toString(),
-    });
-
-    console.log("🔴 SELL EXECUTED", symbol);
-    return order;
-  } catch (err) {
-    console.log("❌ SELL ERROR:", err.body || err);
-  }
-}
-
-async function trade(symbol) {
-  console.log("⏱️ START:", symbol);
-
-  const entryPrice = await getPrice(symbol);
-  if (!entryPrice) return;
-
-  const buyOrder = await buy(symbol);
-  if (!buyOrder) return;
-
-  const qty = parseFloat(buyOrder.executedQty);
-  let highest = entryPrice;
-  let trailingStop = highest * (1 - TRAILING);
-
-  while (true) {
-    await new Promise((r) => setTimeout(r, 3000));
     const price = await getPrice(symbol);
     if (!price) continue;
 
-    if (price > highest) {
-      highest = price;
-      trailingStop = highest * (1 - TRAILING);
-    }
-
-    if (price <= trailingStop && price > entryPrice * (1 + MIN_PROFIT)) {
-      await sell(symbol, qty);
-      console.log("💰 PROFIT SELL:", symbol);
-      return;
-    }
+    const order = await buy(symbol);
+    if (!order) continue;
   }
+
+  setTimeout(loop, LOOP_TIME);
 }
 
-async function loop() {
-  while (true) {
-    for (const symbol of PAIRS) {
-      await trade(symbol);
-    }
-  }
-}
-
+// Start
 loop();
