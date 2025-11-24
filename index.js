@@ -10,19 +10,29 @@ const client = Binance.default({
 
 const LIVE = process.env.LIVE_TRADING === "true";
 
+// Parovi za trgovanje
 const PAIRS = ["BTCUSDC", "ETHUSDC"];
 
-const ORDER_SIZE = 20;      // ✔ postavio si 20 USDC
-const TAKE_PROFIT = 0.004;  // ✔ 0.4% profit
-const STOP_LOSS = -0.003;   // ✔ -0.3% max gubitak
-const COOLDOWN = 60000 * 7; // ✔ jedna trgovina svakih ~7 minuta (štedi USDC)
-                           //   (možeš povećati ako želiš)
+// IZNOS INVESTICIJE PO TRADE-u (SADA 5 USDC)
+const ORDER_SIZE = 5;
 
-console.log("🤖 ULTIMATE BOT — OPCIJA 1");
+// Profit i gubitak
+const TAKE_PROFIT = 0.004; 
+const STOP_LOSS = -0.003;
+
+// Cooldown između tradeova (7 min)
+const COOLDOWN = 60000 * 7;
+
+console.log("🤖 ULTIMATE BOT — FIXED VERSION");
 console.log("LIVE MODE:", LIVE);
 console.log("TRGUJE PAROVE:", PAIRS.join(", "));
 console.log("---------------------------------------");
 
+// -------------------------------
+//   FUNKCIJE
+// -------------------------------
+
+// Uzimanje cijene
 async function getPrice(symbol) {
   try {
     const r = await client.prices({ symbol });
@@ -33,11 +43,31 @@ async function getPrice(symbol) {
   }
 }
 
+// Provjera balansa (DODANO)
+async function getUSDCBalance() {
+  try {
+    const acc = await client.accountInfo();
+    const bal = acc.balances.find(b => b.asset === "USDC");
+    return parseFloat(bal.free);
+  } catch (err) {
+    console.log("❌ BALANCE ERROR:", err.message);
+    return 0;
+  }
+}
+
+// Market BUY
 async function buyMarket(symbol) {
   try {
     if (!LIVE) {
       console.log("🟡 TEST BUY:", symbol);
       return { executedQty: "0" };
+    }
+
+    // ➤ AUTO PROVJERA BALANSA
+    const bal = await getUSDCBalance();
+    if (bal < ORDER_SIZE) {
+      console.log(`⛔ SKIP BUY — premalo USDC (${bal} USDC dostupno)`);
+      return null;
     }
 
     const order = await client.order({
@@ -55,6 +85,7 @@ async function buyMarket(symbol) {
   }
 }
 
+// Market SELL
 async function sellMarket(symbol, qty) {
   try {
     if (!LIVE) {
@@ -77,6 +108,7 @@ async function sellMarket(symbol, qty) {
   }
 }
 
+// Jedan trade ciklus
 async function tradeSymbol(symbol) {
   console.log(`⏱ START: ${symbol}`);
 
@@ -101,14 +133,12 @@ async function tradeSymbol(symbol) {
 
     const diff = (p - entry) / entry;
 
-    // TAKE PROFIT
     if (diff >= TAKE_PROFIT) {
       await sellMarket(symbol, qty);
       console.log("💰 PROFIT CLOSED:", symbol);
       active = false;
     }
 
-    // STOP LOSS
     if (diff <= STOP_LOSS) {
       await sellMarket(symbol, qty);
       console.log("🛑 STOP LOSS:", symbol);
@@ -117,6 +147,7 @@ async function tradeSymbol(symbol) {
   }
 }
 
+// Glavna petlja
 async function startBot() {
   while (true) {
     for (const pair of PAIRS) {
