@@ -1,46 +1,46 @@
 import Binance from "binance-api-node";
 
-// API konekcija
+// -------------------------------
+//   CONFIG
+// -------------------------------
 const client = Binance.default({
   apiKey: process.env.BINANCE_API_KEY,
   apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// Konstante
 const LIVE = process.env.LIVE_TRADING === "true";
+
 const PAIRS = ["BTCUSDC", "ETHUSDC"];
 
-// Opcija C (srednji rizik)
-const ORDER_SIZE = 15;                 // veći profit
-const TRAILING = 0.004;                // 0.4% trailing stop
-const MIN_PROFIT = 0.006;              // 0.6% minimalni profit
-const CHECK_DELAY = 4000;              // 4 sekunde
+const ORDER_SIZE = 20;      // ✔ postavio si 20 USDC
+const TAKE_PROFIT = 0.004;  // ✔ 0.4% profit
+const STOP_LOSS = -0.003;   // ✔ -0.3% max gubitak
+const COOLDOWN = 60000 * 7; // ✔ jedna trgovina svakih ~7 minuta (štedi USDC)
+                           //   (možeš povećati ako želiš)
 
-// Status pozicije da spreči dupli BUY
-const activeTrades = {
-  BTCUSDC: null,
-  ETHUSDC: null
-};
+console.log("🤖 ULTIMATE BOT — OPCIJA 1");
+console.log("LIVE MODE:", LIVE);
+console.log("TRGUJE PAROVE:", PAIRS.join(", "));
+console.log("---------------------------------------");
 
-// Cijena
 async function getPrice(symbol) {
   try {
     const r = await client.prices({ symbol });
     return parseFloat(r[symbol]);
-  } catch {
+  } catch (err) {
+    console.log("❌ PRICE ERROR:", err.message);
     return null;
   }
 }
 
-// BUY
-async function buy(symbol) {
+async function buyMarket(symbol) {
   try {
     if (!LIVE) {
       console.log("🟡 TEST BUY:", symbol);
-      return { executedQty: "0.001" };
+      return { executedQty: "0" };
     }
 
-    const o = await client.order({
+    const order = await client.order({
       symbol,
       side: "BUY",
       type: "MARKET",
@@ -48,22 +48,21 @@ async function buy(symbol) {
     });
 
     console.log("🟢 BUY EXECUTED:", symbol);
-    return o;
+    return order;
   } catch (err) {
-    console.log("❌ BUY ERROR:", err?.body?.msg || err?.message);
+    console.log("❌ BUY ERROR:", err.body?.msg || err.message);
     return null;
   }
 }
 
-// SELL
-async function sell(symbol, qty) {
+async function sellMarket(symbol, qty) {
   try {
     if (!LIVE) {
       console.log("🟡 TEST SELL:", symbol);
-      return;
+      return null;
     }
 
-    const o = await client.order({
+    const order = await client.order({
       symbol,
       side: "SELL",
       type: "MARKET",
@@ -71,74 +70,61 @@ async function sell(symbol, qty) {
     });
 
     console.log("🔴 SELL EXECUTED:", symbol);
+    return order;
   } catch (err) {
-    console.log("❌ SELL ERROR:", err?.body?.msg || err?.message);
+    console.log("❌ SELL ERROR:", err.body?.msg || err.message);
+    return null;
   }
 }
 
-// GLAVNI TRADE
-async function trade(symbol) {
-  if (activeTrades[symbol]) return;   // Sprečava dupli BUY
+async function tradeSymbol(symbol) {
+  console.log(`⏱ START: ${symbol}`);
 
   const price = await getPrice(symbol);
   if (!price) return;
 
-  console.log(`⏱ START: ${symbol} ${price}`);
+  const buyOrder = await buyMarket(symbol);
+  if (!buyOrder || !buyOrder.executedQty) return;
 
-  const order = await buy(symbol);
-  if (!order) return;
+  const qty = parseFloat(buyOrder.executedQty);
+  const entry = price;
 
-  const qty = parseFloat(order.executedQty);
-  let entry = price;
-  let trailingStop = entry * (1 - TRAILING);
+  console.log(`📌 ENTRY ${symbol}: ${entry}`);
 
-  activeTrades[symbol] = { entry, qty };
+  let active = true;
 
-  // LOOP TRAILING STOPA
-  let run = true;
-
-  while (run) {
-    await new Promise(r => setTimeout(r, CHECK_DELAY));
+  while (active) {
+    await new Promise(r => setTimeout(r, 3000));
 
     const p = await getPrice(symbol);
     if (!p) continue;
 
-    // pomjera stop prema gore
-    if (p > entry) {
-      entry = p;
-      trailingStop = entry * (1 - TRAILING);
+    const diff = (p - entry) / entry;
+
+    // TAKE PROFIT
+    if (diff >= TAKE_PROFIT) {
+      await sellMarket(symbol, qty);
+      console.log("💰 PROFIT CLOSED:", symbol);
+      active = false;
     }
 
-    // Uslov za zaštitu + profit
-    if (p <= trailingStop && p > activeTrades[symbol].entry * (1 + MIN_PROFIT)) {
-      await sell(symbol, qty);
-      run = false;
-      activeTrades[symbol] = null;
-      console.log(`✔ PROFIT KOMPILIRAN: ${symbol}`);
+    // STOP LOSS
+    if (diff <= STOP_LOSS) {
+      await sellMarket(symbol, qty);
+      console.log("🛑 STOP LOSS:", symbol);
+      active = false;
     }
   }
 }
 
-// GLAVNA PETLJA — ALI BEZ LOOP BUY ERRORA
-async function start() {
-  console.log("🤖 ULTIMATE BOT — OPCIJA C (srednji rizik)");
-  console.log("LIVE =", LIVE);
-  console.log("PAROVI =", PAIRS.join(", "));
-  console.log("----------------------------------------");
-
+async function startBot() {
   while (true) {
     for (const pair of PAIRS) {
-      try {
-        if (!activeTrades[pair]) {
-          await trade(pair);
-        }
-      } catch (err) {
-        console.log("⚠ LOOP ERROR:", err.message);
-      }
+      await tradeSymbol(pair);
+      console.log(`😴 COOLDOWN ${COOLDOWN / 60000} min...`);
+      await new Promise(r => setTimeout(r, COOLDOWN));
     }
-
-    await new Promise(r => setTimeout(r, 5000));
   }
 }
 
-start();
+startBot();
